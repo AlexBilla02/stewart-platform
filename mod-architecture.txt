@@ -1,0 +1,27 @@
+main.c
+    inizializzazione avvio task UART e control_loop
+
+uart_comm.c
+    inizializzazione driver UART
+    definizione task UART
+    IN <-- byte fisici dal pc
+    OUT --> Coda che viene letta da control_loop    Coordinate aggiornate 
+
+
+controller.c
+    Contiene valori di configurazione del pid e le variabili di stato
+    Esegue calcoli per ottenere pitch e roll. Da pitch e roll calcola angoli per i motori.
+    
+
+actuators.c
+    Comanda i motori
+    IN <-- control_loop
+
+control_loop.c
+    definisce control loop task.
+    Ogni 50 Hz (20ms) 
+        legge coda 
+        invia i valori a controller e riceve i 3 angoli
+        invia i 3 angoli ad actuators
+        pausetta
+
