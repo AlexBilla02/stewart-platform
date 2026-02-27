@@ -5,10 +5,12 @@
       "compilerPath": "/home/alex/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20251107/xtensa-esp-elf/bin/xtensa-esp32-elf-gcc",
       "compileCommands": "${config:idf.buildPath}/compile_commands.json",
       "includePath": [
+        "/home/alex/.espressif/v5.5.3/esp-idf/components/**",
         "${workspaceFolder}/**"
       ],
       "browse": {
         "path": [
+          "/home/alex/.espressif/v5.5.3/esp-idf/components",
           "${workspaceFolder}"
         ],
         "limitSymbolsToIncludedHeaders": true
