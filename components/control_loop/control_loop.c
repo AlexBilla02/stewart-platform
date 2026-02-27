@@ -14,9 +14,9 @@ static const char *TAG="control_loop";
 
 
 
-esp_err_t control_loop_task(void *pvParameters){
+void control_loop_task(void *pvParameters){
 
-    float target_angles[SERVO_COUNT]={90};
+    float target_angles[SERVO_COUNT]={90.0f};
     TickType_t xLastWakeTime=xTaskGetTickCount();
     const TickType_t xFrequency=pdMS_TO_TICKS(LOOP_PERIOD_MS);
 

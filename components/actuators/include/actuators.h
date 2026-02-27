@@ -6,9 +6,9 @@
 #define SERVO_MIN_ANGLE 0
 #define SERVO_MAX_ANGLE 180
 
-#define SERVO_0_GPIO 17
-#define SERVO_1_GPIO 18
-#define SERVO_2_GPIO 19
+#define SERVO_0_GPIO 18
+#define SERVO_1_GPIO 19
+#define SERVO_2_GPIO 20
 
 
 

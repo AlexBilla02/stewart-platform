@@ -3,7 +3,7 @@
 #include "freertos/task.h"
 #include "driver/mcpwm_prelude.h"
 #include "actuators.h"
-
+#include "esp_log.h"
 #define SERVO_TIMEBASE_RESOLUTION_HZ 1000000  // 1 MHz (1 tick = 1 microsecondo)
 #define SERVO_TIMEBASE_PERIOD        20000    // 20000 tick = 20 millisecondi (50 Hz)
 
@@ -31,7 +31,6 @@ static uint32_t angle_to_compare(float angle){
 
 esp_err_t actuators_init(void){
     // 1. Configurazione Timer
-    mcpwm_timer_handle_t timer = NULL;
     mcpwm_timer_config_t timer_config = {
         .group_id = 0,
         .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
