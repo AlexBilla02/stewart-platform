@@ -10,10 +10,6 @@
 #define SERVO_1_GPIO 19
 #define SERVO_2_GPIO 20
 
-
-
-
-
 esp_err_t actuators_init(void);
 
 esp_err_t actuators_set_angles(const float angles[]);
