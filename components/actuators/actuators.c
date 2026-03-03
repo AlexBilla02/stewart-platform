@@ -4,13 +4,11 @@
 #include "driver/mcpwm_prelude.h"
 #include "actuators.h"
 #include "esp_log.h"
+
 #define SERVO_TIMEBASE_RESOLUTION_HZ 1000000  // 1 MHz (1 tick = 1 microsecondo)
 #define SERVO_TIMEBASE_PERIOD        20000    // 20000 tick = 20 millisecondi (50 Hz)
-
 #define SERVO_MIN_PULSEWIDTH_US 500
 #define SERVO_MAX_PULSEWIDTH_US 2500
-
-
 
 static const char *TAG="actuators";
 
