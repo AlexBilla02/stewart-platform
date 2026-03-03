@@ -10,13 +10,11 @@ static const char *TAG="uart_comm";
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE 1024
 
-
 #define UART_TX_PIN 43
 #define UART_RX_PIN 44
 
 QueueHandle_t ball_pos_queue=NULL;
 static QueueHandle_t uart_event_queue;
-
 
 static esp_err_t uart_comm_init(void){
     ball_pos_queue=xQueueCreate(1,sizeof(ball_pos_t));
