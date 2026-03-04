@@ -82,4 +82,3 @@ Desktop.ini
 
 # VS code User-specific configuration files
 .vscode/*
-!.vscode/launch.json
