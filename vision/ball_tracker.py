@@ -4,13 +4,13 @@ import serial
 import time
 
 # --- Serial config ---
-SERIAL_PORT = '/dev/ttyUSB0'
+SERIAL_PORT = '/dev/ttyACM0'
 BAUD_RATE = 115200
 
 # --- Vision config ---
 # HSV Range to find white in platform
 LOWER_WHITE = np.array([0, 0, 200])
-UPPER_WHITE = np.array([180, 50, 255])
+UPPER_WHITE = np.array([180, 25, 255])
 
 # HSV Range to distinguish ball 
 LOWER_BALL = np.array([5, 120, 150])
@@ -25,7 +25,7 @@ def init_serial():
 
 def main():
     ser = init_serial()
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(1)
     
     # Low Res
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
