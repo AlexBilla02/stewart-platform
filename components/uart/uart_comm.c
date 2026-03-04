@@ -1,4 +1,5 @@
 #include "uart_comm.h"
+#include "actuators.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -6,7 +7,7 @@
 
 static const char *TAG="uart_comm";
 
-#define UART_PORT_NUM UART_NUM_0
+#define UART_PORT_NUM UART_NUM_1
 #define UART_BAUD_RATE 115200
 #define BUF_SIZE 1024
 
@@ -16,7 +17,7 @@ static const char *TAG="uart_comm";
 QueueHandle_t ball_pos_queue=NULL;
 static QueueHandle_t uart_event_queue;
 
-static esp_err_t uart_comm_init(void){
+esp_err_t uart_comm_init(void){
     ball_pos_queue=xQueueCreate(1,sizeof(ball_pos_t));
     if(ball_pos_queue==NULL)
         return ESP_FAIL;
@@ -39,36 +40,36 @@ static esp_err_t uart_comm_init(void){
 
 void uart_rx_task(void *pvParameters){
     uart_event_t event;
-    uint8_t* data_buffer= (uint8_t*) malloc(BUF_SIZE);
-
-    ESP_ERROR_CHECK(uart_comm_init());
-
-    char line_buffer[128];
-    int line_pos=0;
+    uart_packet_t packet;
 
     ESP_LOGI(TAG,"Task UART RX listening");
 
     while(1){
-        if(xQueueReceive(uart_event_queue, (void * )&event,portMAX_DELAY)){
+        if(xQueueReceive(uart_event_queue, (void *) &event,portMAX_DELAY)){
             if(event.type==UART_DATA){
-                int len=uart_read_bytes(UART_PORT_NUM,data_buffer,event.size,portMAX_DELAY);
-                for(int i=0; i<len; i++){
-                    char c=(char)data_buffer[i];
-                    if(c == '\n'){
-                        line_buffer[line_pos]='\0';
-                        
-                        ball_pos_t new_pos;
-                        if (sscanf(line_buffer, "%f,%f", &new_pos.x, &new_pos.y)==2){
-                            xQueueOverwrite(ball_pos_queue, &new_pos);
-                        }
-                        else{
-                            ESP_LOGW(TAG,"UART format not valid: %s",line_buffer);
-                        }
-                        line_pos=0;
+                int len = uart_read_bytes(UART_PORT_NUM, &packet, sizeof(uart_packet_t), portMAX_DELAY);
+                if(len == sizeof(uart_packet_t) && packet.header == PACKET_HEADER){
+                    
+                    uint8_t crc = 0;
+                    for (int i = 0; i < sizeof(uart_packet_t) - 1; i++) {
+                        crc ^= ((uint8_t*)&packet)[i];
                     }
-                    else if (c!='\r'){
-                        if(line_pos < sizeof(line_buffer) - 1){
-                            line_buffer[line_pos++]=c;
+
+                    if (crc != packet.checksum) {
+                        ESP_LOGW(TAG, "Wrong checksum. Packet discarded");
+                        continue;
+                    }
+
+                    switch (packet.cmd_type) {
+                        case CMD_TRACKING:{
+                            xQueueOverwrite(ball_pos_queue, &packet.payload.tracking);
+                            break;
+                        }
+                            
+                        case CMD_SERVO_TEST:{
+                            ESP_LOGI(TAG, "New calibration command (servo_id: %d) angle (%d)", packet.payload.servo.servo_id, packet.payload.servo.angle);
+                            actuators_set_angles_single(packet.payload.servo.servo_id, packet.payload.servo.angle);
+                            break;
                         }
                     }
                 }

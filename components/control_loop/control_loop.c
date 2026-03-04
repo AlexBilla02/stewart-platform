@@ -23,7 +23,6 @@ void control_loop_task(void *pvParameters)
 
     float target_angles[SERVO_COUNT];
     ball_pos_t current_pos = {0};
-    int no_data_count = 0;
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
     const TickType_t xFrequency = pdMS_TO_TICKS(LOOP_PERIOD_MS);
@@ -43,7 +42,7 @@ void control_loop_task(void *pvParameters)
             actuators_set_angles(target_angles);
         } else {
             // No data has EVER been received yet (queue is empty).
-            actuators_set_neutral();
+            //actuators_set_neutral();
         }
 
         xTaskDelayUntil(&xLastWakeTime, xFrequency);

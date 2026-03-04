@@ -12,7 +12,7 @@
 #define DEFAULT_INTEGRAL_LIM  50.0f // anti windup clamp limit
 #define DEFAULT_OUTPUT_LIM    30.0f // output limit
 
-#define NEUTRAL_ANGLE         90.0f // neutral servo position
+#define NEUTRAL_ANGLE         95.0f // neutral servo position
 #define IK_GAIN               1.0f  // inverted cinematic gain 
 
 static const char *TAG = "controller";

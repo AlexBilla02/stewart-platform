@@ -9,11 +9,11 @@
 #define SERVO_TIMEBASE_PERIOD        20000    // 20000 tick = 20 millisecondi (50 Hz)
 #define SERVO_MIN_PULSEWIDTH_US 500
 #define SERVO_MAX_PULSEWIDTH_US 2500
-#define NEUTRAL_ANGLE         90.0f // neutral servo position
+#define NEUTRAL_ANGLE         95.0f // neutral servo position
 
 static const char *TAG="actuators";
 
-static const int servo_gpios[SERVO_COUNT]={SERVO_0_GPIO};
+static const int servo_gpios[SERVO_COUNT]={SERVO_0_GPIO, SERVO_1_GPIO, SERVO_2_GPIO};
 
 static mcpwm_timer_handle_t timer;
 static mcpwm_oper_handle_t operators[SERVO_COUNT]={NULL};
@@ -94,6 +94,23 @@ esp_err_t actuators_set_angles(const float angles[]){
         uint32_t compare_val=angle_to_compare(angles[i]);
         mcpwm_comparator_set_compare_value(comparators[i],compare_val);
     }
+    return ESP_OK;
+}
+
+esp_err_t actuators_set_angles_single(uint8_t servo_id, int16_t target_angle){
+    if(servo_id >= SERVO_COUNT){
+        ESP_LOGE(TAG,"servo_id %d out of range",servo_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if(target_angle<SERVO_MIN_ANGLE || target_angle>SERVO_MAX_ANGLE){
+        ESP_LOGE(TAG,"Angle %d out of range", target_angle);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // transform the angle in a pulswidth duration and send to the comparator
+    uint32_t compare_val=angle_to_compare(target_angle);
+    mcpwm_comparator_set_compare_value(comparators[servo_id], compare_val);
     return ESP_OK;
 }
 
