@@ -5,6 +5,7 @@
 
 #define SERVO_MIN_ANGLE 55
 #define SERVO_MAX_ANGLE 135
+#define SERVO_FULL_RANGE 180
 
 #define SERVO_0_GPIO 16
 #define SERVO_1_GPIO 17

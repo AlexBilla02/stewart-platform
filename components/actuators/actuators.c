@@ -22,7 +22,7 @@ static mcpwm_gen_handle_t generators[SERVO_COUNT]={NULL};
 
 // transform angle to pulsewidth
 static uint32_t angle_to_compare(float angle){
-    float pulse_us=SERVO_MIN_PULSEWIDTH_US + (angle / SERVO_MAX_ANGLE) * (SERVO_MAX_PULSEWIDTH_US - SERVO_MIN_PULSEWIDTH_US);
+    float pulse_us=SERVO_MIN_PULSEWIDTH_US + (angle / SERVO_FULL_RANGE) * (SERVO_MAX_PULSEWIDTH_US - SERVO_MIN_PULSEWIDTH_US);
     
     return (uint32_t)pulse_us;
 }

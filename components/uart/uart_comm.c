@@ -48,8 +48,7 @@ void uart_rx_task(void *pvParameters){
         if(xQueueReceive(uart_event_queue, (void *) &event,portMAX_DELAY)){
             if(event.type==UART_DATA){
                 int len = uart_read_bytes(UART_PORT_NUM, &packet, sizeof(uart_packet_t), portMAX_DELAY);
-                if(len == sizeof(uart_packet_t) && packet.header == PACKET_HEADER){
-                    
+                if(len == sizeof(uart_packet_t) && packet.header == PACKET_HEADER){                    
                     uint8_t crc = 0;
                     for (int i = 0; i < sizeof(uart_packet_t) - 1; i++) {
                         crc ^= ((uint8_t*)&packet)[i];
