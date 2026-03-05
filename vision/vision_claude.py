@@ -29,10 +29,11 @@ PKT_TRACKING   = 0x01
 PKT_CALIB      = 0x02
 BAUD_RATE      = 115200
 
-LOWER_WHITE = np.array([0,   0,   200])
-UPPER_WHITE = np.array([180, 25,  255])
-LOWER_BALL  = np.array([5,   120, 150])
-UPPER_BALL  = np.array([35,  255, 255])
+LOWER_GREEN = np.array([50, 35, 127])
+UPPER_GREEN = np.array([77, 255, 255])
+
+LOWER_BALL = np.array([5, 80, 120])
+UPPER_BALL = np.array([35, 255, 255])
 
 VIDEO_W, VIDEO_H = 640, 480
 
@@ -78,26 +79,37 @@ class VisionThread(threading.Thread):
             blurred = cv2.GaussianBlur(frame, (5, 5), 0)
             hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
-            # — Piattaforma —
-            mask_w      = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
-            conts_plat, _ = cv2.findContours(mask_w, cv2.RETR_EXTERNAL,
-                                              cv2.CHAIN_APPROX_SIMPLE)
+            # Find Platform
+            mask_w = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
+            conts_plat, _ = cv2.findContours(mask_w, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
             plat_center = None
+            plat_radius = 0
+
             if conts_plat:
                 c = max(conts_plat, key=cv2.contourArea)
                 ((px, py), pr) = cv2.minEnclosingCircle(c)
                 if pr > 50:
                     plat_center = (int(px), int(py))
-                    cv2.circle(frame, plat_center, int(pr), (255, 80, 0), 2)
-                    cv2.drawMarker(frame, plat_center, (255, 80, 0),
-                                   cv2.MARKER_CROSS, 20, 2)
+                    plat_radius = int(pr)
+                    cv2.circle(frame, plat_center, plat_radius, (255, 80, 0), 2)
+                    cv2.drawMarker(frame, plat_center, (255, 80, 0), cv2.MARKER_CROSS, 20, 2)
 
-            # — Pallina —
+            # Find Ball inside the platform 
             mask_b = cv2.inRange(hsv, LOWER_BALL, UPPER_BALL)
-            mask_b = cv2.erode(mask_b,  None, iterations=2)
-            mask_b = cv2.dilate(mask_b, None, iterations=5)
-            conts_ball, _ = cv2.findContours(mask_b, cv2.RETR_EXTERNAL,
-                                              cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Apply Region Of Interest to find the ball
+            if plat_center:
+                roi_mask = np.zeros(mask_b.shape, dtype=np.uint8)
+                cv2.circle(roi_mask, plat_center, max(0, plat_radius - 2), 255, -1)
+                mask_b = cv2.bitwise_and(mask_b, roi_mask)
+            else:
+                mask_b = np.zeros_like(mask_b)
+
+            mask_b = cv2.erode(mask_b,  None, iterations=1)
+            mask_b = cv2.dilate(mask_b, None, iterations=4)
+            
+            conts_ball, _ = cv2.findContours(mask_b, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             rel_x = rel_y = 0
             ball_found = False
@@ -105,7 +117,8 @@ class VisionThread(threading.Thread):
             if conts_ball and plat_center:
                 c = max(conts_ball, key=cv2.contourArea)
                 M = cv2.moments(c)
-                if M["m00"] > 0:
+                # m00 > 10 evita di rilevare singoli pixel di rumore
+                if M["m00"] > 10:
                     bx = int(M["m10"] / M["m00"])
                     by = int(M["m01"] / M["m00"])
                     rel_x = bx - plat_center[0]
@@ -118,18 +131,20 @@ class VisionThread(threading.Thread):
                                 (12, 36), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.8, (0, 220, 80), 2)
 
-                    # Invia pacchetto solo se tracking attivo
+                    # Send packet only if tracking active
                     if self.active:
                         pkt = build_packet(PKT_TRACKING, rel_x, rel_y)
                         try:
                             if self.serial_ref[0]:
                                 self.serial_ref[0].write(pkt)
-                        except serial.SerialException:
+                        except Exception: 
                             pass
+                        
+                        # Aggiornamento coda
                         self.info_q.put({
                             'type': 'tracking',
                             'rel_x': rel_x, 'rel_y': rel_y,
-                            'pkt': packet_hex(pkt),
+                            'pkt': packet_hex(pkt) if 'packet_hex' in globals() else "",
                             'ball': ball_found,
                             'plat': plat_center is not None
                         })
@@ -142,6 +157,7 @@ class VisionThread(threading.Thread):
 
             # Metti frame nella coda (non bloccante)
             if not self.frame_q.full():
+                # Inviamo sia il frame che la maschera filtrata per debug visivo nella GUI
                 self.frame_q.put((frame.copy(), mask_b.copy()))
 
         cap.release()
