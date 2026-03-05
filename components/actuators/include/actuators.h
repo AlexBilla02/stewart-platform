@@ -15,3 +15,4 @@ esp_err_t actuators_init(void);
 esp_err_t actuators_set_angles(const float angles[]);
 esp_err_t actuators_set_angles_single(uint8_t servo_id, int16_t target_angle);
 esp_err_t actuators_set_neutral(void);
+void actuators_get_angles(float angles_out[]);

@@ -2,18 +2,13 @@
 #include <math.h>
 #include "esp_log.h"
 
-#define DEFAULT_KP            1.0f  // proportional gain
-#define DEFAULT_KI            0.0f  // integral gain
-#define DEFAULT_KD            0.5f  // derivative gain
+#define DEFAULT_SETPOINT_X    0.0f
+#define DEFAULT_SETPOINT_Y    0.0f
 
-#define DEFAULT_SETPOINT_X    0.0f  // platform center X
-#define DEFAULT_SETPOINT_Y    0.0f  // platform center Y
+#define DEFAULT_INTEGRAL_LIM  50.0f
+#define DEFAULT_OUTPUT_LIM    30.0f
 
-#define DEFAULT_INTEGRAL_LIM  50.0f // anti windup clamp limit
-#define DEFAULT_OUTPUT_LIM    30.0f // output limit
-
-#define NEUTRAL_ANGLE         95.0f // neutral servo position
-#define IK_GAIN               1.0f  // inverted cinematic gain 
+#define IK_GAIN               1.0f
 
 static const char *TAG = "controller";
 
@@ -82,23 +77,24 @@ static void pid_reset(pid_state_t *pid)
 }
 
 // initialize controller
-void controller_init(controller_t *ctrl)
+void controller_init(controller_t *ctrl, const platform_config_t *cfg)
 {
     pid_init(&ctrl->pid_x,
-            DEFAULT_KP, DEFAULT_KI, DEFAULT_KD,
+            cfg->kp, cfg->ki, cfg->kd,
             DEFAULT_SETPOINT_X,
             DEFAULT_INTEGRAL_LIM, DEFAULT_OUTPUT_LIM);
 
     pid_init(&ctrl->pid_y,
-            DEFAULT_KP, DEFAULT_KI, DEFAULT_KD,
+            cfg->kp, cfg->ki, cfg->kd,
             DEFAULT_SETPOINT_Y,
             DEFAULT_INTEGRAL_LIM, DEFAULT_OUTPUT_LIM);
 
-    ctrl->neutral_angle = NEUTRAL_ANGLE;
-    ctrl->gain          = IK_GAIN;
+    for (int i = 0; i < SERVO_COUNT; i++)
+        ctrl->neutral_angles[i] = cfg->neutral_angles[i];
+    ctrl->gain = IK_GAIN;
 
     ESP_LOGI(TAG, "Controller initialized  Kp=%.2f Ki=%.2f Kd=%.2f",
-            DEFAULT_KP, DEFAULT_KI, DEFAULT_KD);
+            cfg->kp, cfg->ki, cfg->kd);
 }
 
 /*
@@ -129,7 +125,7 @@ void controller_compute(controller_t *ctrl, const ball_pos_t *pos, float dt, flo
     for (int i = 0; i < SERVO_COUNT; i++) {
         float alpha = servo_mount_angle[i];
         float tilt  = ctrl->gain * (cosf(alpha) * roll + sinf(alpha) * pitch);
-        float angle = ctrl->neutral_angle + tilt;
+        float angle = ctrl->neutral_angles[i] + tilt;
 
         // output clamp
         if (angle < (float)SERVO_MIN_ANGLE) angle = (float)SERVO_MIN_ANGLE;
@@ -143,4 +139,17 @@ void controller_reset(controller_t *ctrl)
 {
     pid_reset(&ctrl->pid_x);
     pid_reset(&ctrl->pid_y);
+}
+
+void controller_set_pid(controller_t *ctrl, float kp, float ki, float kd)
+{
+    ctrl->pid_x.kp = kp;
+    ctrl->pid_x.ki = ki;
+    ctrl->pid_x.kd = kd;
+    ctrl->pid_y.kp = kp;
+    ctrl->pid_y.ki = ki;
+    ctrl->pid_y.kd = kd;
+    pid_reset(&ctrl->pid_x);
+    pid_reset(&ctrl->pid_y);
+    ESP_LOGI(TAG, "PID updated Kp=%.2f Ki=%.2f Kd=%.2f", kp, ki, kd);
 }

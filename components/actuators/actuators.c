@@ -19,6 +19,7 @@ static mcpwm_timer_handle_t timer;
 static mcpwm_oper_handle_t operators[SERVO_COUNT]={NULL};
 static mcpwm_cmpr_handle_t comparators[SERVO_COUNT]={NULL};
 static mcpwm_gen_handle_t generators[SERVO_COUNT]={NULL};
+static float current_angles[SERVO_COUNT] = {0};
 
 // transform angle to pulsewidth
 static uint32_t angle_to_compare(float angle){
@@ -70,8 +71,6 @@ esp_err_t actuators_init(void){
     // timer enable and PWM signal initalization
     ESP_ERROR_CHECK(mcpwm_timer_enable(timer));
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP));
-    
-    actuators_set_neutral();
 
     return ESP_OK;
 }
@@ -89,12 +88,18 @@ esp_err_t actuators_set_angles(const float angles[]){
             return ESP_ERR_INVALID_ARG;
         }
     }
-    // transform the angle in a pulswidth duration and send to the comparator
     for(int i=0; i<SERVO_COUNT; i++){
         uint32_t compare_val=angle_to_compare(angles[i]);
         mcpwm_comparator_set_compare_value(comparators[i],compare_val);
+        current_angles[i] = angles[i];
     }
     return ESP_OK;
+}
+
+void actuators_get_angles(float angles_out[])
+{
+    for (int i = 0; i < SERVO_COUNT; i++)
+        angles_out[i] = current_angles[i];
 }
 
 esp_err_t actuators_set_angles_single(uint8_t servo_id, int16_t target_angle){
@@ -108,9 +113,9 @@ esp_err_t actuators_set_angles_single(uint8_t servo_id, int16_t target_angle){
         return ESP_ERR_INVALID_ARG;
     }
 
-    // transform the angle in a pulswidth duration and send to the comparator
     uint32_t compare_val=angle_to_compare(target_angle);
     mcpwm_comparator_set_compare_value(comparators[servo_id], compare_val);
+    current_angles[servo_id] = (float)target_angle;
     return ESP_OK;
 }
 

@@ -15,11 +15,15 @@ static const char *TAG="uart_comm";
 #define UART_RX_PIN 44
 
 QueueHandle_t ball_pos_queue=NULL;
+QueueHandle_t pid_cfg_queue=NULL;
+QueueHandle_t save_cmd_queue=NULL;
 static QueueHandle_t uart_event_queue;
 
 esp_err_t uart_comm_init(void){
     ball_pos_queue=xQueueCreate(1,sizeof(ball_pos_t));
-    if(ball_pos_queue==NULL)
+    pid_cfg_queue=xQueueCreate(1,sizeof(pid_cfg_t));
+    save_cmd_queue=xQueueCreate(1,sizeof(uint8_t));
+    if(ball_pos_queue==NULL || pid_cfg_queue==NULL || save_cmd_queue==NULL)
         return ESP_FAIL;
 
     uart_config_t uart_config={
@@ -69,6 +73,20 @@ void uart_rx_task(void *pvParameters){
                         case CMD_SERVO_TEST:{
                             ESP_LOGI(TAG, "New calibration command (servo_id: %d) angle (%d)", packet.payload.servo.servo_id, packet.payload.servo.angle);
                             actuators_set_angles_single(packet.payload.servo.servo_id, packet.payload.servo.angle);
+                            break;
+                        }
+
+                        case CMD_PID_CFG:{
+                            ESP_LOGI(TAG, "PID config: Kp=%u Ki=%u Kd=%u",
+                                    packet.payload.pid.kp, packet.payload.pid.ki, packet.payload.pid.kd);
+                            xQueueOverwrite(pid_cfg_queue, &packet.payload.pid);
+                            break;
+                        }
+
+                        case CMD_SAVE:{
+                            ESP_LOGI(TAG, "Save command received");
+                            uint8_t flag = 1;
+                            xQueueOverwrite(save_cmd_queue, &flag);
                             break;
                         }
                     }
