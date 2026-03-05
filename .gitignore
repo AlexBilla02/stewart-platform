@@ -82,3 +82,6 @@ Desktop.ini
 
 # VS code User-specific configuration files
 .vscode/*
+
+# Python virtual env
+Pipfile*
