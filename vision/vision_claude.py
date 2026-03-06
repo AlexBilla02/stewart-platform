@@ -11,7 +11,9 @@ Struttura pacchetto (11 byte):
 """
 
 import cv2
+import json
 import numpy as np
+from pathlib import Path
 import serial
 import serial.tools.list_ports
 import struct
@@ -40,7 +42,9 @@ UPPER_BALL  = np.array([35, 255, 255])
 
 VIDEO_W, VIDEO_H = 640, 480
 
-# ── Device V4L2 ──────────────────────────────────────────────────────────── #
+# ── File preset HSV ─────────────────────────────────────────────────────── #
+# Il file viene creato nella stessa cartella dello script
+PRESETS_FILE = Path(__file__).parent / "hsv_presets.json"
 # Percorso del device video da controllare con v4l2-ctl
 CAM_DEVICE = "/dev/video0"
 
@@ -133,7 +137,6 @@ class VisionThread(threading.Thread):
         cap.set(cv2.CAP_PROP_EXPOSURE, -6)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  VIDEO_W)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, VIDEO_H)
-        cap.set(cv2.CAP_PROP_FPS, 30)
 
         while self.running_ev.is_set():
             ret, frame = cap.read()
@@ -157,6 +160,17 @@ class VisionThread(threading.Thread):
                     plat_center = (int(px), int(py))
                     plat_radius = int(pr)
                     cv2.circle(frame, plat_center, plat_radius, (255, 80, 0), 2)
+                    # Linee diametro asse X e Y — blu sottili
+                    cx_, cy_ = plat_center
+                    cv2.line(frame,
+                             (cx_ - plat_radius, cy_),
+                             (cx_ + plat_radius, cy_),
+                             (200, 80, 0), 1, cv2.LINE_AA)
+                    cv2.line(frame,
+                             (cx_, cy_ - plat_radius),
+                             (cx_, cy_ + plat_radius),
+                             (200, 80, 0), 1, cv2.LINE_AA)
+                    # Marker croce centrale
                     cv2.drawMarker(frame, plat_center, (255, 80, 0),
                                    cv2.MARKER_CROSS, 20, 2)
 
@@ -257,6 +271,9 @@ class App(tk.Tk):
         self._refresh_ports()
         self._poll_frames()
         self._poll_info()
+        # Carica preset da file — dopo _build_ui, così log_text esiste già
+        self._load_presets_from_file()
+        self._refresh_preset_ui()
         # Applica default camera 500 ms dopo il boot della GUI
         self.after(500, self._apply_camera_defaults)
 
@@ -445,13 +462,16 @@ class App(tk.Tk):
         self.track_btn.pack(fill=tk.X)
 
     def _build_hsv_tuning(self, parent):
-        tk.Label(parent, text="HSV BALL TUNE", bg=self.PANEL_BG,
-                 fg=self.MUTED, font=("Courier New", 9, "bold")).pack(anchor='w')
+        # ── Pallina (arancione) ──────────────────────────────────────────── #
+        tk.Label(parent, text="HSV BALL (arancione)",
+                 bg=self.PANEL_BG, fg=self.ACCENT,
+                 font=("Courier New", 9, "bold")).pack(anchor='w')
+
         for label, attr, default, lo, hi in [
-            ("H min", "hsv_h_min",  5,   0, 180),
-            ("H max", "hsv_h_max", 35,   0, 180),
-            ("S min", "hsv_s_min", 80,   0, 255),
-            ("V min", "hsv_v_min", 120,  0, 255),
+            ("H min", "hsv_ball_h_min",  5,   0, 180),
+            ("H max", "hsv_ball_h_max", 35,   0, 180),
+            ("S min", "hsv_ball_s_min", 80,   0, 255),
+            ("V min", "hsv_ball_v_min", 120,  0, 255),
         ]:
             row = tk.Frame(parent, bg=self.PANEL_BG)
             row.pack(fill=tk.X, pady=1)
@@ -459,24 +479,267 @@ class App(tk.Tk):
                      font=self.FONT_MONO, width=7,
                      anchor='w').pack(side=tk.LEFT)
             var = tk.IntVar(value=default)
+            val_lbl = tk.Label(row, text=f"{default:3d}", bg=self.PANEL_BG,
+                               fg=self.ACCENT, font=("Courier New", 9),
+                               width=3)
             tk.Scale(row, from_=lo, to=hi, orient=tk.HORIZONTAL,
-                     variable=var, length=190,
+                     variable=var, length=168,
                      bg=self.PANEL_BG, fg=self.TEXT,
                      troughcolor=self.BORDER, highlightthickness=0, bd=0,
-                     sliderrelief=tk.FLAT,
-                     command=lambda v, a=attr: self._update_hsv(a, int(v))
+                     sliderrelief=tk.FLAT, showvalue=False,
+                     command=lambda v, a=attr, lbl=val_lbl: (
+                         lbl.config(text=f"{int(v):3d}"),
+                         self._update_hsv(a, int(v)))
                      ).pack(side=tk.LEFT)
+            val_lbl.pack(side=tk.LEFT, padx=(4, 0))
             setattr(self, attr, var)
 
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
+
+        # ── Piattaforma (verde) ──────────────────────────────────────────── #
+        tk.Label(parent, text="HSV PLATFORM (verde)",
+                 bg=self.PANEL_BG, fg="#3fb950",
+                 font=("Courier New", 9, "bold")).pack(anchor='w')
+
+        for label, attr, default, lo, hi in [
+            ("H min", "hsv_plat_h_min", 50,   0, 180),
+            ("H max", "hsv_plat_h_max", 77,   0, 180),
+            ("S min", "hsv_plat_s_min", 55,   0, 255),
+            ("S max", "hsv_plat_s_max", 255,  0, 255),
+            ("V min", "hsv_plat_v_min", 127,  0, 255),
+            ("V max", "hsv_plat_v_max", 255,  0, 255),
+        ]:
+            row = tk.Frame(parent, bg=self.PANEL_BG)
+            row.pack(fill=tk.X, pady=1)
+            tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.MUTED,
+                     font=self.FONT_MONO, width=7,
+                     anchor='w').pack(side=tk.LEFT)
+            var = tk.IntVar(value=default)
+            val_lbl = tk.Label(row, text=f"{default:3d}", bg=self.PANEL_BG,
+                               fg="#3fb950", font=("Courier New", 9),
+                               width=3)
+            tk.Scale(row, from_=lo, to=hi, orient=tk.HORIZONTAL,
+                     variable=var, length=168,
+                     bg=self.PANEL_BG, fg=self.TEXT,
+                     troughcolor=self.BORDER, highlightthickness=0, bd=0,
+                     sliderrelief=tk.FLAT, showvalue=False,
+                     command=lambda v, a=attr, lbl=val_lbl: (
+                         lbl.config(text=f"{int(v):3d}"),
+                         self._update_hsv(a, int(v)))
+                     ).pack(side=tk.LEFT)
+            val_lbl.pack(side=tk.LEFT, padx=(4, 0))
+            setattr(self, attr, var)
+
+        # Pulsante reset valori di default
+        tk.Button(parent, text="↺ RESET DEFAULT",
+                  bg=self.BORDER, fg=self.MUTED,
+                  relief=tk.FLAT, font=("Courier New", 8),
+                  cursor="hand2",
+                  command=self._reset_hsv_defaults
+                  ).pack(anchor='e', pady=(4, 0))
+
+        # ── Preset HSV ──────────────────────────────────────────────────── #
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
+        tk.Label(parent, text="PRESET HSV", bg=self.PANEL_BG,
+                 fg=self.MUTED, font=("Courier New", 9, "bold")
+                 ).pack(anchor='w')
+
+        preset_row = tk.Frame(parent, bg=self.PANEL_BG)
+        preset_row.pack(fill=tk.X, pady=(4, 0))
+
+        self._preset_btns = []
+        for i in range(1, 4):                    # Preset 1, 2, 3
+            col = tk.Frame(preset_row, bg=self.PANEL_BG)
+            col.pack(side=tk.LEFT, padx=(0, 6))
+
+            name_var = tk.StringVar(value=f"Preset {i}")
+            name_entry = tk.Entry(col, textvariable=name_var, width=9,
+                                  bg=self.BORDER, fg=self.TEXT,
+                                  insertbackground=self.TEXT,
+                                  relief=tk.FLAT,
+                                  font=("Courier New", 8))
+            name_entry.pack(fill=tk.X, pady=(0, 2))
+
+            btn_load = tk.Button(col, text="▶ CARICA",
+                                 bg=self.BORDER, fg=self.ACCENT,
+                                 relief=tk.FLAT,
+                                 font=("Courier New", 8, "bold"),
+                                 cursor="hand2",
+                                 command=lambda idx=i: self._load_preset(idx))
+            btn_load.pack(fill=tk.X, pady=1)
+
+            btn_save = tk.Button(col, text="⬇ SALVA",
+                                 bg=self.BORDER, fg=self.YELLOW,
+                                 relief=tk.FLAT,
+                                 font=("Courier New", 8),
+                                 cursor="hand2",
+                                 command=lambda idx=i, nv=name_var:
+                                     self._save_preset(idx, nv.get()))
+            btn_save.pack(fill=tk.X, pady=1)
+
+            # Etichetta info preset (mostra cosa contiene)
+            info_lbl = tk.Label(col, text="vuoto",
+                                bg=self.PANEL_BG, fg=self.MUTED,
+                                font=("Courier New", 7), wraplength=80)
+            info_lbl.pack(anchor='w')
+
+            self._preset_btns.append({
+                'name_var':  name_var,
+                'btn_load':  btn_load,
+                'info_lbl':  info_lbl,
+            })
+
+        # Inizializza dizionario preset (slot 1-3) — carica da file se esiste
+        self._hsv_presets = {1: None, 2: None, 3: None}
+        self._refresh_preset_ui()
+
     def _update_hsv(self, attr, val):
-        global LOWER_BALL, UPPER_BALL
-        m = {'hsv_h_min': (LOWER_BALL, 0), 'hsv_h_max': (UPPER_BALL, 0),
-             'hsv_s_min': (LOWER_BALL, 1), 'hsv_v_min': (LOWER_BALL, 2)}
+        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
+        m = {
+            # Pallina
+            'hsv_ball_h_min': (LOWER_BALL,  0),
+            'hsv_ball_h_max': (UPPER_BALL,  0),
+            'hsv_ball_s_min': (LOWER_BALL,  1),
+            'hsv_ball_v_min': (LOWER_BALL,  2),
+            # Piattaforma
+            'hsv_plat_h_min': (LOWER_GREEN, 0),
+            'hsv_plat_h_max': (UPPER_GREEN, 0),
+            'hsv_plat_s_min': (LOWER_GREEN, 1),
+            'hsv_plat_s_max': (UPPER_GREEN, 1),
+            'hsv_plat_v_min': (LOWER_GREEN, 2),
+            'hsv_plat_v_max': (UPPER_GREEN, 2),
+        }
         if attr in m:
             m[attr][0][m[attr][1]] = val
 
+    def _reset_hsv_defaults(self):
+        """Ripristina tutti gli slider HSV ai valori di default."""
+        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
+        defaults = {
+            'hsv_ball_h_min': 5,   'hsv_ball_h_max': 35,
+            'hsv_ball_s_min': 80,  'hsv_ball_v_min': 120,
+            'hsv_plat_h_min': 50,  'hsv_plat_h_max': 77,
+            'hsv_plat_s_min': 55,  'hsv_plat_s_max': 255,
+            'hsv_plat_v_min': 127, 'hsv_plat_v_max': 255,
+        }
+        for attr, val in defaults.items():
+            getattr(self, attr).set(val)
+            self._update_hsv(attr, val)
+        # Ri-sincronizza gli array numpy
+        LOWER_BALL  = np.array([defaults['hsv_ball_h_min'],
+                                 defaults['hsv_ball_s_min'],
+                                 defaults['hsv_ball_v_min']])
+        UPPER_BALL  = np.array([defaults['hsv_ball_h_max'], 255, 255])
+        LOWER_GREEN = np.array([defaults['hsv_plat_h_min'],
+                                 defaults['hsv_plat_s_min'],
+                                 defaults['hsv_plat_v_min']])
+        UPPER_GREEN = np.array([defaults['hsv_plat_h_max'],
+                                 defaults['hsv_plat_s_max'],
+                                 defaults['hsv_plat_v_max']])
+
+    # ── Metodi preset HSV ───────────────────────────────────────────────── #
+
+    def _current_hsv_values(self) -> dict:
+        """Legge i valori correnti di tutti gli slider HSV."""
+        keys = [
+            'hsv_ball_h_min', 'hsv_ball_h_max',
+            'hsv_ball_s_min', 'hsv_ball_v_min',
+            'hsv_plat_h_min', 'hsv_plat_h_max',
+            'hsv_plat_s_min', 'hsv_plat_s_max',
+            'hsv_plat_v_min', 'hsv_plat_v_max',
+        ]
+        return {k: getattr(self, k).get() for k in keys}
+
+    def _apply_hsv_values(self, values: dict):
+        """Imposta tutti gli slider e aggiorna gli array numpy."""
+        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
+        for attr, val in values.items():
+            getattr(self, attr).set(val)
+            self._update_hsv(attr, val)
+        # Ri-sincronizza gli array in modo esplicito
+        LOWER_BALL  = np.array([values['hsv_ball_h_min'],
+                                 values['hsv_ball_s_min'],
+                                 values['hsv_ball_v_min']])
+        UPPER_BALL  = np.array([values['hsv_ball_h_max'], 255, 255])
+        LOWER_GREEN = np.array([values['hsv_plat_h_min'],
+                                 values['hsv_plat_s_min'],
+                                 values['hsv_plat_v_min']])
+        UPPER_GREEN = np.array([values['hsv_plat_h_max'],
+                                 values['hsv_plat_s_max'],
+                                 values['hsv_plat_v_max']])
+
+    def _save_preset(self, idx: int, name: str):
+        """Salva i valori correnti nello slot idx e scrive su file JSON."""
+        self._hsv_presets[idx] = {
+            'name':   name.strip() or f"Preset {idx}",
+            'values': self._current_hsv_values(),
+        }
+        self._refresh_preset_ui()
+        self._save_presets_to_file()
+        self._log(f"Preset {idx} salvato: '{self._hsv_presets[idx]['name']}'",
+                  "system")
+
+    def _load_preset(self, idx: int):
+        """Carica nello slot idx e aggiorna slider + array."""
+        p = self._hsv_presets.get(idx)
+        if p is None:
+            self._log(f"Preset {idx} vuoto — prima salva qualcosa.", "error")
+            return
+        self._apply_hsv_values(p['values'])
+        self._log(f"Preset {idx} caricato: '{p['name']}'", "system")
+
+    def _save_presets_to_file(self):
+        """Serializza _hsv_presets in JSON su PRESETS_FILE."""
+        try:
+            # Converti le chiavi intere in stringa (JSON richiede chiavi stringa)
+            data = {str(k): v for k, v in self._hsv_presets.items()}
+            PRESETS_FILE.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+            self._log(f"Preset salvati in {PRESETS_FILE.name}", "system")
+        except OSError as e:
+            self._log(f"Errore scrittura preset: {e}", "error")
+
+    def _load_presets_from_file(self):
+        """Carica i preset da PRESETS_FILE se esiste, silenzioso se assente."""
+        if not PRESETS_FILE.exists():
+            return
+        try:
+            raw  = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+            # Riconverti le chiavi stringa in interi
+            for k, v in raw.items():
+                slot = int(k)
+                if slot in self._hsv_presets and v is not None:
+                    self._hsv_presets[slot] = v
+            self._log(
+                f"Preset caricati da {PRESETS_FILE.name} "
+                f"({sum(1 for v in self._hsv_presets.values() if v)} slot occupati)",
+                "system"
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            self._log(f"Errore lettura preset: {e}", "error")
+
+    def _refresh_preset_ui(self):
+        """Aggiorna etichette info e colore pulsante CARICA per ogni slot."""
+        for i, entry in enumerate(self._preset_btns, start=1):
+            p = self._hsv_presets.get(i)
+            if p is None:
+                entry['info_lbl'].config(text="vuoto", fg=self.MUTED)
+                entry['btn_load'].config(fg=self.MUTED)
+            else:
+                v = p['values']
+                summary = (
+                    f"B H{v['hsv_ball_h_min']}-{v['hsv_ball_h_max']} "
+                    f"S{v['hsv_ball_s_min']} V{v['hsv_ball_v_min']}\n"
+                    f"P H{v['hsv_plat_h_min']}-{v['hsv_plat_h_max']} "
+                    f"S{v['hsv_plat_s_min']}-{v['hsv_plat_s_max']}"
+                )
+                entry['name_var'].set(p['name'])
+                entry['info_lbl'].config(text=summary, fg=self.ACCENT)
+                entry['btn_load'].config(fg=self.ACCENT)
+
     # ══════════════════════════════════════════════════════════════════════ #
-    #  TAB CALIBRAZIONE
     # ══════════════════════════════════════════════════════════════════════ #
 
     def _build_calib_tab(self, parent):
