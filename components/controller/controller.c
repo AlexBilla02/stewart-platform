@@ -2,9 +2,11 @@
 #include <math.h>
 #include "esp_log.h"
 
-#define DEFAULT_KP            1.0f  // proportional gain
-#define DEFAULT_KI            0.0f  // integral gain
-#define DEFAULT_KD            0.5f  // derivative gain
+// best values: 0.05, 0.03, 0.05
+
+#define DEFAULT_KP            0.05f  // proportional gain
+#define DEFAULT_KI            0.03f  // integral gain
+#define DEFAULT_KD            0.05f  // derivative gain
 
 #define DEFAULT_SETPOINT_X    0.0f  // platform center X
 #define DEFAULT_SETPOINT_Y    0.0f  // platform center Y

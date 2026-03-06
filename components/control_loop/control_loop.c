@@ -29,6 +29,8 @@ void control_loop_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Control loop started (%d ms period)", LOOP_PERIOD_MS);
 
+    actuators_set_neutral();
+
     while (1) {
         // reads the last ball position received from the camera
         // Note: we use xQueuePeek instead of xQueueReceive to keep the last known position in the queue
@@ -40,9 +42,6 @@ void control_loop_task(void *pvParameters)
 
             // actuator step: target_angles -> physical PWM signal
             actuators_set_angles(target_angles);
-        } else {
-            // No data has EVER been received yet (queue is empty).
-            //actuators_set_neutral();
         }
 
         xTaskDelayUntil(&xLastWakeTime, xFrequency);
