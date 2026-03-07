@@ -6,27 +6,17 @@
       "hsv_ball_h_max": 35,
       "hsv_ball_s_min": 144,
       "hsv_ball_v_min": 120,
-      "hsv_plat_h_min": 30,
-      "hsv_plat_h_max": 81,
-      "hsv_plat_s_min": 33,
-      "hsv_plat_s_max": 255,
-      "hsv_plat_v_min": 140,
-      "hsv_plat_v_max": 255
+      "roi_margin": 17
     }
   },
   "2": {
     "name": "Preset 2",
     "values": {
       "hsv_ball_h_min": 5,
-      "hsv_ball_h_max": 18,
+      "hsv_ball_h_max": 35,
       "hsv_ball_s_min": 144,
       "hsv_ball_v_min": 120,
-      "hsv_plat_h_min": 30,
-      "hsv_plat_h_max": 81,
-      "hsv_plat_s_min": 33,
-      "hsv_plat_s_max": 255,
-      "hsv_plat_v_min": 140,
-      "hsv_plat_v_max": 255
+      "roi_margin": 17
     }
   },
   "3": null

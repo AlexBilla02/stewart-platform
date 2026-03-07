@@ -42,6 +42,22 @@ UPPER_BALL  = np.array([35, 255, 255])
 
 VIDEO_W, VIDEO_H = 640, 480
 
+# ── ArUco ────────────────────────────────────────────────────────────────── #
+# Dizionario usato per stampare i marker (deve corrispondere ai marker fisici)
+ARUCO_DICT_ID     = cv2.aruco.DICT_4X4_50
+# ID dei 4 marker incollati sulla piattaforma (modificabili nell'interfaccia)
+# Con 4 marker la pallina può occluderne al massimo 1 — i 3 rimasti bastano
+# per calcolare il circocentro con qualsiasi combinazione.
+ARUCO_IDS_DEFAULT = [0, 1, 2, 3]
+# Numero minimo di marker visibili per calcolare la piattaforma
+ARUCO_MIN_VISIBLE = 3
+# Margine extra (pixel) aggiunto al raggio della ROI per rilevare la pallina
+# anche quando è al bordo o leggermente fuori dai marker
+ROI_RADIUS_MARGIN = 18
+# File di calibrazione ArUco (stessa cartella dello script)
+ARUCO_CALIB_FILE  = Path(__file__).parent / "aruco_calib.json"
+
+
 # ── File preset HSV ─────────────────────────────────────────────────────── #
 # Il file viene creato nella stessa cartella dello script
 PRESETS_FILE = Path(__file__).parent / "hsv_presets.json"
@@ -117,21 +133,83 @@ def v4l2_get(device: str, control: str):
         return False, None, str(e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  VISION THREAD
+#  UTILITY GEOMETRICA
+# ══════════════════════════════════════════════════════════════════════════════
+
+def kasa_circle_fit(points):
+    """
+    Fit di un cerchio ai minimi quadrati (metodo di Kåsa) su N punti 2D.
+    Robusto agli errori di posizionamento: minimizza la somma dei quadrati
+    delle distanze di ogni punto dalla circonferenza.
+    Restituisce (center: np.array [x,y], radius: float) oppure (None, 0).
+    Richiede almeno 3 punti non collineari.
+    """
+    pts = np.array(points, dtype=float)
+    if len(pts) < 3:
+        return None, 0.0
+    x, y = pts[:, 0], pts[:, 1]
+    A = np.column_stack([x, y, np.ones(len(pts))])
+    b = x**2 + y**2
+    try:
+        result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    except np.linalg.LinAlgError:
+        return None, 0.0
+    cx = result[0] / 2.0
+    cy = result[1] / 2.0
+    r  = float(np.sqrt(result[2] + cx**2 + cy**2))
+    if r < 1:
+        return None, 0.0
+    return np.array([cx, cy]), r
+
+
+def estimate_center_from_offsets(found: dict, offsets: dict):
+    """
+    Stima il centro della piattaforma usando gli offset di calibrazione.
+
+    Per ogni marker visibile calcola:
+        stima_centro = pos_rilevata - offset_calibrato
+
+    dove offset_calibrato = pos_marker_calibrata - centro_calibrato.
+    Restituisce la media di tutte le stime (una per ogni marker visibile).
+
+    found:   {marker_id: [x, y]}   — posizioni rilevate runtime
+    offsets: {marker_id: [dx, dy]} — offset salvati durante la calibrazione
+    """
+    estimates = []
+    for mid, pos in found.items():
+        if mid in offsets:
+            off = np.array(offsets[mid])
+            estimates.append(np.array(pos) - off)
+    if not estimates:
+        return None
+    return np.mean(estimates, axis=0)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class VisionThread(threading.Thread):
+    """
+    Cattura frames, rileva la piattaforma tramite 3 marker ArUco,
+    individua la pallina con HSV nella ROI, invia coordinate all'ESP32.
+    """
 
-    def __init__(self, cam_idx, frame_q, info_q, serial_ref, running_ev):
+    def __init__(self, cam_idx, frame_q, info_q, serial_ref, running_ev,
+                 calib_ref):
         super().__init__(daemon=True)
         self.cam_idx    = cam_idx
         self.frame_q    = frame_q
         self.info_q     = info_q
         self.serial_ref = serial_ref
         self.running_ev = running_ev
+        self.calib_ref  = calib_ref   # [dict_or_None] — condiviso con GUI
         self.active     = False
 
+    # ── Loop principale ───────────────────────────────────────────────────── #
+
     def run(self):
+        # Inizializza ArUco nel thread
+        aruco_dict   = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+        aruco_params = cv2.aruco.DetectorParameters()
+        detector     = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+
         cap = cv2.VideoCapture(self.cam_idx)
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
         cap.set(cv2.CAP_PROP_EXPOSURE, -6)
@@ -144,41 +222,97 @@ class VisionThread(threading.Thread):
                 time.sleep(0.05)
                 continue
 
-            blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-            hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+            calib = self.calib_ref[0]
 
-            # Piattaforma
-            mask_w = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
-            conts_plat, _ = cv2.findContours(mask_w, cv2.RETR_EXTERNAL,
-                                              cv2.CHAIN_APPROX_SIMPLE)
-            plat_center = None
-            plat_radius = 0
-            if conts_plat:
-                c = max(conts_plat, key=cv2.contourArea)
-                ((px, py), pr) = cv2.minEnclosingCircle(c)
-                if pr > 50:
-                    plat_center = (int(px), int(py))
-                    plat_radius = int(pr)
-                    cv2.circle(frame, plat_center, plat_radius, (255, 80, 0), 2)
-                    # Linee diametro asse X e Y — blu sottili
-                    cx_, cy_ = plat_center
-                    cv2.line(frame,
-                             (cx_ - plat_radius, cy_),
-                             (cx_ + plat_radius, cy_),
-                             (200, 80, 0), 1, cv2.LINE_AA)
-                    cv2.line(frame,
-                             (cx_, cy_ - plat_radius),
-                             (cx_, cy_ + plat_radius),
-                             (200, 80, 0), 1, cv2.LINE_AA)
-                    # Marker croce centrale
-                    cv2.drawMarker(frame, plat_center, (255, 80, 0),
-                                   cv2.MARKER_CROSS, 20, 2)
+            # ── Rileva marker ArUco ──────────────────────────────────────── #
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = detector.detectMarkers(gray)
 
-            # Pallina — solo dentro ROI piattaforma
+            plat_center  = None
+            plat_radius  = 0
+            markers_seen = []
+
+            if ids is not None and calib is not None:
+                target_ids = calib['marker_ids']
+                found = {}
+
+                for i, mid in enumerate(ids.flatten()):
+                    if mid in target_ids:
+                        ctr = corners[i][0].mean(axis=0)
+                        found[mid] = ctr.tolist()
+                        markers_seen.append(int(mid))
+                        cv2.aruco.drawDetectedMarkers(frame, [corners[i]])
+                        cv2.circle(frame, (int(ctr[0]), int(ctr[1])),
+                                   5, (0, 255, 255), -1)
+
+                if len(found) >= ARUCO_MIN_VISIBLE:
+                    # Stima centro con offset calibrati (robusto al
+                    # posizionamento impreciso dei marker)
+                    offsets_raw = calib.get('marker_offsets', {})
+                    # Normalizza chiavi a int (JSON potrebbe averle come str)
+                    offsets = {int(k): v for k, v in offsets_raw.items()}
+
+                    center_arr = None
+                    radius     = 0.0
+
+                    if offsets:
+                        center_arr = estimate_center_from_offsets(found, offsets)
+                        radius     = float(calib.get('circle_radius_px',
+                                           calib.get('circumradius_px', 0.0)))
+
+                    # Fallback a Kåsa se offset assenti o stima fallita
+                    if center_arr is None or radius < 20:
+                        center_arr, radius = kasa_circle_fit(
+                            list(found.values()))
+
+                    if center_arr is not None and radius > 20:
+                        cx_f, cy_f = float(center_arr[0]), float(center_arr[1])
+                        plat_center = (int(cx_f), int(cy_f))
+                        plat_radius = int(radius)
+
+                        # BGR: (200, 0, 0) = blu
+                        BLUE      = (200, 60,  0)
+                        BLUE_THIN = (180, 40,  0)
+                        cv2.circle(frame, plat_center, plat_radius, BLUE, 2)
+                        cv2.line(frame,
+                                 (plat_center[0] - plat_radius, plat_center[1]),
+                                 (plat_center[0] + plat_radius, plat_center[1]),
+                                 BLUE_THIN, 1, cv2.LINE_AA)
+                        cv2.line(frame,
+                                 (plat_center[0], plat_center[1] - plat_radius),
+                                 (plat_center[0], plat_center[1] + plat_radius),
+                                 BLUE_THIN, 1, cv2.LINE_AA)
+                        cv2.drawMarker(frame, plat_center, BLUE,
+                                       cv2.MARKER_CROSS, 20, 2)
+                        n = len(found)
+                        cv2.putText(frame, f"{n}/4 mrkr",
+                                    (plat_center[0] + plat_radius + 4,
+                                     plat_center[1]),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.4, BLUE, 1)
+
+                elif 0 < len(found) < ARUCO_MIN_VISIBLE:
+                    cv2.putText(frame,
+                                f"MARKER PARZIALI ({len(found)}/{len(target_ids)})",
+                                (10, VIDEO_H - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (0, 200, 200), 1)
+
+            elif calib is None:
+                cv2.putText(frame, "NON CALIBRATO — vai al tab ARUCO",
+                            (10, VIDEO_H - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                            (0, 80, 220), 2)
+
+            # ── HSV pallina nella ROI ─────────────────────────────────────── #
+            hsv    = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0),
+                                  cv2.COLOR_BGR2HSV)
             mask_b = cv2.inRange(hsv, LOWER_BALL, UPPER_BALL)
+
             if plat_center:
                 roi = np.zeros(mask_b.shape, dtype=np.uint8)
-                cv2.circle(roi, plat_center, max(0, plat_radius - 2), 255, -1)
+                cv2.circle(roi, plat_center,
+                           plat_radius + ROI_RADIUS_MARGIN, 255, -1)
                 mask_b = cv2.bitwise_and(mask_b, roi)
             else:
                 mask_b = np.zeros_like(mask_b)
@@ -213,23 +347,43 @@ class VisionThread(threading.Thread):
                         except Exception:
                             pass
                         self.info_q.put({
-                            'type': 'tracking',
-                            'rel_x': rel_x, 'rel_y': rel_y,
-                            'pkt':  packet_hex(pkt),
-                            'ball': ball_found,
-                            'plat': plat_center is not None
+                            'type':    'tracking',
+                            'rel_x':   rel_x, 'rel_y': rel_y,
+                            'pkt':     packet_hex(pkt),
+                            'ball':    ball_found,
+                            'plat':    plat_center is not None,
+                            'markers': markers_seen,
                         })
 
-            status_col = (0, 220, 80) if (ball_found and plat_center) \
-                         else (0, 60, 220)
+            # ── HUD ───────────────────────────────────────────────────────── #
+            n_seen = len(markers_seen)
+            m_col  = self._marker_color(n_seen)
+            cv2.putText(frame, f"MARKERS {n_seen}/4",
+                        (VIDEO_W - 130, 55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, m_col, 1)
+            status_col = (0, 220, 80) if (ball_found and plat_center)                          else (0, 60, 220)
             cv2.putText(frame, "TRACKING ON" if self.active else "PREVIEW",
-                        (VIDEO_W - 160, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.65, status_col, 2)
+                        (VIDEO_W - 160, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, status_col, 2)
+
+            self.info_q.put({
+                'type':    'status',
+                'markers': markers_seen,
+                'plat':    plat_center is not None,
+                'ball':    ball_found,
+            })
 
             if not self.frame_q.full():
                 self.frame_q.put((frame.copy(), mask_b.copy()))
 
         cap.release()
+
+    @staticmethod
+    def _marker_color(n: int):
+        if n == 4: return (0, 220, 80)    # tutti e 4: verde
+        if n == 3: return (0, 200, 200)   # 3/4: ciano — funziona ma degradato
+        if n == 2: return (0, 140, 220)   # 2/4: blu — insufficiente
+        return (0, 60, 220)               # <2: rosso-blu
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  APPLICAZIONE GUI
@@ -255,6 +409,7 @@ class App(tk.Tk):
         self.resizable(False, False)
 
         self.ser_ref   = [None]
+        self.calib_ref = [None]   # [dict_or_None] — condiviso con VisionThread
         self.connected = False
         self.frame_q   = queue.Queue(maxsize=2)
         self.info_q    = queue.Queue(maxsize=50)
@@ -271,6 +426,8 @@ class App(tk.Tk):
         self._refresh_ports()
         self._poll_frames()
         self._poll_info()
+        # Carica calibrazione ArUco (prima dei preset, già usa il log)
+        self._load_aruco_calib()
         # Carica preset da file — dopo _build_ui, così log_text esiste già
         self._load_presets_from_file()
         self._refresh_preset_ui()
@@ -408,6 +565,10 @@ class App(tk.Tk):
         nb.add(tab_cam, text="  CAMERA  ")
         self._build_camera_tab(tab_cam)
 
+        tab_ar = tk.Frame(nb, bg=self.PANEL_BG, padx=12, pady=12)
+        nb.add(tab_ar, text="  ARUCO  ")
+        self._build_aruco_tab(tab_ar)
+
     def _on_tab_change(self, event):
         if self.vision_thread and self.vision_thread.is_alive():
             if self.notebook.index(self.notebook.select()) == 1:
@@ -420,9 +581,9 @@ class App(tk.Tk):
     # ══════════════════════════════════════════════════════════════════════ #
 
     def _build_tracking_tab(self, parent):
-        desc = ("Il tracking rileva la piattaforma (bordo verde)\n"
-                "e la pallina (arancione).\n"
-                "Premere AVVIA per iniziare l'invio all'ESP32.")
+        desc = ("La piattaforma viene rilevata tramite 3 marker ArUco.\n"
+                "La pallina viene rilevata con HSV nella ROI.\n"
+                "Calibra prima i marker nel tab ARUCO.")
         tk.Label(parent, text=desc, bg=self.PANEL_BG, fg=self.MUTED,
                  font=("Courier New", 9), justify=tk.LEFT).pack(anchor='w')
         tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=8)
@@ -494,49 +655,41 @@ class App(tk.Tk):
             val_lbl.pack(side=tk.LEFT, padx=(4, 0))
             setattr(self, attr, var)
 
-        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
-
-        # ── Piattaforma (verde) ──────────────────────────────────────────── #
-        tk.Label(parent, text="HSV PLATFORM (verde)",
-                 bg=self.PANEL_BG, fg="#3fb950",
-                 font=("Courier New", 9, "bold")).pack(anchor='w')
-
-        for label, attr, default, lo, hi in [
-            ("H min", "hsv_plat_h_min", 50,   0, 180),
-            ("H max", "hsv_plat_h_max", 77,   0, 180),
-            ("S min", "hsv_plat_s_min", 55,   0, 255),
-            ("S max", "hsv_plat_s_max", 255,  0, 255),
-            ("V min", "hsv_plat_v_min", 127,  0, 255),
-            ("V max", "hsv_plat_v_max", 255,  0, 255),
-        ]:
-            row = tk.Frame(parent, bg=self.PANEL_BG)
-            row.pack(fill=tk.X, pady=1)
-            tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.MUTED,
-                     font=self.FONT_MONO, width=7,
-                     anchor='w').pack(side=tk.LEFT)
-            var = tk.IntVar(value=default)
-            val_lbl = tk.Label(row, text=f"{default:3d}", bg=self.PANEL_BG,
-                               fg="#3fb950", font=("Courier New", 9),
-                               width=3)
-            tk.Scale(row, from_=lo, to=hi, orient=tk.HORIZONTAL,
-                     variable=var, length=168,
-                     bg=self.PANEL_BG, fg=self.TEXT,
-                     troughcolor=self.BORDER, highlightthickness=0, bd=0,
-                     sliderrelief=tk.FLAT, showvalue=False,
-                     command=lambda v, a=attr, lbl=val_lbl: (
-                         lbl.config(text=f"{int(v):3d}"),
-                         self._update_hsv(a, int(v)))
-                     ).pack(side=tk.LEFT)
-            val_lbl.pack(side=tk.LEFT, padx=(4, 0))
-            setattr(self, attr, var)
-
-        # Pulsante reset valori di default
+        # Pulsante reset valori di default (solo pallina)
         tk.Button(parent, text="↺ RESET DEFAULT",
                   bg=self.BORDER, fg=self.MUTED,
                   relief=tk.FLAT, font=("Courier New", 8),
                   cursor="hand2",
                   command=self._reset_hsv_defaults
                   ).pack(anchor='e', pady=(4, 0))
+
+        # ── ROI margin ───────────────────────────────────────────────────── #
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
+        tk.Label(parent, text="ROI MARGIN",
+                 bg=self.PANEL_BG, fg=self.YELLOW,
+                 font=("Courier New", 9, "bold")).pack(anchor='w')
+
+        roi_row = tk.Frame(parent, bg=self.PANEL_BG)
+        roi_row.pack(fill=tk.X, pady=1)
+        tk.Label(roi_row, text="Margin", bg=self.PANEL_BG, fg=self.MUTED,
+                 font=self.FONT_MONO, width=7,
+                 anchor='w').pack(side=tk.LEFT)
+        self.roi_margin_var = tk.IntVar(value=ROI_RADIUS_MARGIN)
+        roi_val_lbl = tk.Label(roi_row, text=f"{ROI_RADIUS_MARGIN:3d}",
+                               bg=self.PANEL_BG, fg=self.YELLOW,
+                               font=("Courier New", 9), width=3)
+        tk.Scale(roi_row, from_=0, to=60, orient=tk.HORIZONTAL,
+                 variable=self.roi_margin_var, length=168,
+                 bg=self.PANEL_BG, fg=self.TEXT,
+                 troughcolor=self.BORDER, highlightthickness=0, bd=0,
+                 sliderrelief=tk.FLAT, showvalue=False,
+                 command=lambda v, lbl=roi_val_lbl: (
+                     lbl.config(text=f"{int(v):3d}"),
+                     self._update_roi_margin(int(v)))
+                 ).pack(side=tk.LEFT)
+        roi_val_lbl.pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(roi_row, text="px", bg=self.PANEL_BG, fg=self.MUTED,
+                 font=("Courier New", 8)).pack(side=tk.LEFT, padx=(4, 0))
 
         # ── Preset HSV ──────────────────────────────────────────────────── #
         tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
@@ -594,79 +747,57 @@ class App(tk.Tk):
         self._refresh_preset_ui()
 
     def _update_hsv(self, attr, val):
-        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
+        global LOWER_BALL, UPPER_BALL
         m = {
-            # Pallina
-            'hsv_ball_h_min': (LOWER_BALL,  0),
-            'hsv_ball_h_max': (UPPER_BALL,  0),
-            'hsv_ball_s_min': (LOWER_BALL,  1),
-            'hsv_ball_v_min': (LOWER_BALL,  2),
-            # Piattaforma
-            'hsv_plat_h_min': (LOWER_GREEN, 0),
-            'hsv_plat_h_max': (UPPER_GREEN, 0),
-            'hsv_plat_s_min': (LOWER_GREEN, 1),
-            'hsv_plat_s_max': (UPPER_GREEN, 1),
-            'hsv_plat_v_min': (LOWER_GREEN, 2),
-            'hsv_plat_v_max': (UPPER_GREEN, 2),
+            'hsv_ball_h_min': (LOWER_BALL, 0),
+            'hsv_ball_h_max': (UPPER_BALL, 0),
+            'hsv_ball_s_min': (LOWER_BALL, 1),
+            'hsv_ball_v_min': (LOWER_BALL, 2),
         }
         if attr in m:
             m[attr][0][m[attr][1]] = val
 
+    def _update_roi_margin(self, val: int):
+        global ROI_RADIUS_MARGIN
+        ROI_RADIUS_MARGIN = val
+
     def _reset_hsv_defaults(self):
-        """Ripristina tutti gli slider HSV ai valori di default."""
-        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
+        global LOWER_BALL, UPPER_BALL, ROI_RADIUS_MARGIN
         defaults = {
-            'hsv_ball_h_min': 5,   'hsv_ball_h_max': 35,
-            'hsv_ball_s_min': 80,  'hsv_ball_v_min': 120,
-            'hsv_plat_h_min': 50,  'hsv_plat_h_max': 77,
-            'hsv_plat_s_min': 55,  'hsv_plat_s_max': 255,
-            'hsv_plat_v_min': 127, 'hsv_plat_v_max': 255,
+            'hsv_ball_h_min': 5,  'hsv_ball_h_max': 35,
+            'hsv_ball_s_min': 80, 'hsv_ball_v_min': 120,
         }
         for attr, val in defaults.items():
             getattr(self, attr).set(val)
             self._update_hsv(attr, val)
-        # Ri-sincronizza gli array numpy
-        LOWER_BALL  = np.array([defaults['hsv_ball_h_min'],
-                                 defaults['hsv_ball_s_min'],
-                                 defaults['hsv_ball_v_min']])
-        UPPER_BALL  = np.array([defaults['hsv_ball_h_max'], 255, 255])
-        LOWER_GREEN = np.array([defaults['hsv_plat_h_min'],
-                                 defaults['hsv_plat_s_min'],
-                                 defaults['hsv_plat_v_min']])
-        UPPER_GREEN = np.array([defaults['hsv_plat_h_max'],
-                                 defaults['hsv_plat_s_max'],
-                                 defaults['hsv_plat_v_max']])
+        LOWER_BALL = np.array([5,  80, 120])
+        UPPER_BALL = np.array([35, 255, 255])
+        ROI_RADIUS_MARGIN = 18
+        self.roi_margin_var.set(18)
 
     # ── Metodi preset HSV ───────────────────────────────────────────────── #
 
     def _current_hsv_values(self) -> dict:
-        """Legge i valori correnti di tutti gli slider HSV."""
-        keys = [
-            'hsv_ball_h_min', 'hsv_ball_h_max',
-            'hsv_ball_s_min', 'hsv_ball_v_min',
-            'hsv_plat_h_min', 'hsv_plat_h_max',
-            'hsv_plat_s_min', 'hsv_plat_s_max',
-            'hsv_plat_v_min', 'hsv_plat_v_max',
-        ]
-        return {k: getattr(self, k).get() for k in keys}
+        keys = ['hsv_ball_h_min', 'hsv_ball_h_max',
+                'hsv_ball_s_min', 'hsv_ball_v_min']
+        d = {k: getattr(self, k).get() for k in keys}
+        d['roi_margin'] = self.roi_margin_var.get()
+        return d
 
     def _apply_hsv_values(self, values: dict):
-        """Imposta tutti gli slider e aggiorna gli array numpy."""
-        global LOWER_BALL, UPPER_BALL, LOWER_GREEN, UPPER_GREEN
-        for attr, val in values.items():
-            getattr(self, attr).set(val)
-            self._update_hsv(attr, val)
-        # Ri-sincronizza gli array in modo esplicito
-        LOWER_BALL  = np.array([values['hsv_ball_h_min'],
-                                 values['hsv_ball_s_min'],
-                                 values['hsv_ball_v_min']])
-        UPPER_BALL  = np.array([values['hsv_ball_h_max'], 255, 255])
-        LOWER_GREEN = np.array([values['hsv_plat_h_min'],
-                                 values['hsv_plat_s_min'],
-                                 values['hsv_plat_v_min']])
-        UPPER_GREEN = np.array([values['hsv_plat_h_max'],
-                                 values['hsv_plat_s_max'],
-                                 values['hsv_plat_v_max']])
+        global LOWER_BALL, UPPER_BALL, ROI_RADIUS_MARGIN
+        for attr in ('hsv_ball_h_min', 'hsv_ball_h_max',
+                     'hsv_ball_s_min', 'hsv_ball_v_min'):
+            if attr in values and hasattr(self, attr):
+                getattr(self, attr).set(values[attr])
+                self._update_hsv(attr, values[attr])
+        LOWER_BALL = np.array([values.get('hsv_ball_h_min', 5),
+                                values.get('hsv_ball_s_min', 80),
+                                values.get('hsv_ball_v_min', 120)])
+        UPPER_BALL = np.array([values.get('hsv_ball_h_max', 35), 255, 255])
+        if 'roi_margin' in values:
+            ROI_RADIUS_MARGIN = int(values['roi_margin'])
+            self.roi_margin_var.set(ROI_RADIUS_MARGIN)
 
     def _save_preset(self, idx: int, name: str):
         """Salva i valori correnti nello slot idx e scrive su file JSON."""
@@ -730,10 +861,9 @@ class App(tk.Tk):
             else:
                 v = p['values']
                 summary = (
-                    f"B H{v['hsv_ball_h_min']}-{v['hsv_ball_h_max']} "
-                    f"S{v['hsv_ball_s_min']} V{v['hsv_ball_v_min']}\n"
-                    f"P H{v['hsv_plat_h_min']}-{v['hsv_plat_h_max']} "
-                    f"S{v['hsv_plat_s_min']}-{v['hsv_plat_s_max']}"
+                    f"H {v.get('hsv_ball_h_min','?')}-{v.get('hsv_ball_h_max','?')} "
+                    f"S {v.get('hsv_ball_s_min','?')} "
+                    f"V {v.get('hsv_ball_v_min','?')}"
                 )
                 entry['name_var'].set(p['name'])
                 entry['info_lbl'].config(text=summary, fg=self.ACCENT)
@@ -1280,6 +1410,251 @@ class App(tk.Tk):
             state=tk.DISABLED if self._auto_wb_on else tk.NORMAL)
 
     # ══════════════════════════════════════════════════════════════════════ #
+    #  TAB ARUCO — Calibrazione marker piattaforma
+    # ══════════════════════════════════════════════════════════════════════ #
+
+    def _build_aruco_tab(self, parent):
+        # ── Stato calibrazione ───────────────────────────────────────────── #
+        self._section_label(parent, "STATO CALIBRAZIONE")
+
+        self.lbl_calib_status = tk.Label(
+            parent,
+            text="● NON CALIBRATO",
+            bg=self.PANEL_BG, fg=self.RED,
+            font=("Courier New", 10, "bold"))
+        self.lbl_calib_status.pack(anchor='w', pady=(4, 0))
+
+        self.lbl_calib_detail = tk.Label(
+            parent, text="Nessun file di calibrazione trovato.",
+            bg=self.PANEL_BG, fg=self.MUTED,
+            font=("Courier New", 8), wraplength=340, justify=tk.LEFT)
+        self.lbl_calib_detail.pack(anchor='w', pady=(2, 6))
+
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
+
+        # ── ID marker ────────────────────────────────────────────────────── #
+        self._section_label(parent, "ID MARKER (devono corrispondere ai marker stampati)")
+
+        id_row = tk.Frame(parent, bg=self.PANEL_BG)
+        id_row.pack(fill=tk.X, pady=(4, 8))
+
+        self._marker_id_vars = []
+        for i, default_id in enumerate(ARUCO_IDS_DEFAULT):
+            tk.Label(id_row, text=f"M{i}:", bg=self.PANEL_BG, fg=self.MUTED,
+                     font=self.FONT_MONO).pack(side=tk.LEFT, padx=(0 if i == 0 else 8, 2))
+            var = tk.IntVar(value=default_id)
+            tk.Spinbox(id_row, from_=0, to=49, textvariable=var, width=3,
+                       bg=self.BORDER, fg=self.TEXT,
+                       buttonbackground=self.BORDER, relief=tk.FLAT,
+                       font=self.FONT_MONO).pack(side=tk.LEFT)
+            self._marker_id_vars.append(var)
+
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=6)
+
+        # ── Pulsante calibrazione ─────────────────────────────────────────── #
+        self._section_label(parent, "PROCEDURA")
+        tk.Label(parent,
+                 text="1. Avvia la camera\n"
+                      "2. Assicurati che tutti e 4 i marker siano visibili\n"
+                      "3. Tieni la piattaforma ferma e orizzontale\n"
+                      "4. Premi CALIBRA",
+                 bg=self.PANEL_BG, fg=self.MUTED,
+                 font=("Courier New", 8), justify=tk.LEFT).pack(anchor='w',
+                                                                 pady=(4, 8))
+
+        self.btn_calibrate = tk.Button(
+            parent, text="🎯  CALIBRA ORA",
+            bg=self.ACCENT, fg=self.DARK_BG,
+            relief=tk.FLAT,
+            font=("Courier New", 10, "bold"),
+            cursor="hand2", padx=12, pady=7,
+            command=self._do_calibrate)
+        self.btn_calibrate.pack(fill=tk.X)
+
+        tk.Button(parent, text="✕  RESET CALIBRAZIONE",
+                  bg=self.BORDER, fg=self.RED,
+                  relief=tk.FLAT, font=("Courier New", 9),
+                  cursor="hand2", pady=4,
+                  command=self._reset_aruco_calib
+                  ).pack(fill=tk.X, pady=(6, 0))
+
+        tk.Frame(parent, bg=self.BORDER, height=1).pack(fill=tk.X, pady=8)
+
+        # ── Stato marker live ─────────────────────────────────────────────── #
+        self._section_label(parent, "MARKER VISIBILI (live)")
+        self._marker_leds = []
+        led_row = tk.Frame(parent, bg=self.PANEL_BG)
+        led_row.pack(fill=tk.X, pady=(4, 0))
+        for i in range(4):
+            col = tk.Frame(led_row, bg=self.PANEL_BG)
+            col.pack(side=tk.LEFT, padx=(0, 16))
+            lbl = tk.Label(col, text=f"● M{i}\nID ?",
+                           bg=self.PANEL_BG, fg=self.MUTED,
+                           font=("Courier New", 9), justify=tk.CENTER)
+            lbl.pack()
+            self._marker_leds.append(lbl)
+
+    # ── Azioni calibrazione ──────────────────────────────────────────────── #
+
+    def _do_calibrate(self):
+        """
+        Cattura un singolo frame e tenta la rilevazione dei 4 marker.
+        Bastano almeno 3 marker visibili per calibrare.
+        """
+        if not (self.vision_thread and self.vision_thread.is_alive()):
+            messagebox.showwarning("Attenzione", "Avvia prima la camera.")
+            return
+
+        target_ids = [v.get() for v in self._marker_id_vars]
+        if len(set(target_ids)) != 4:
+            messagebox.showerror("Errore", "I 4 ID marker devono essere tutti diversi.")
+            return
+
+        # Richiedi un frame fresco alla camera
+        # Svuotiamo la queue per avere l'ultimo frame disponibile
+        last_frame = None
+        for _ in range(5):
+            time.sleep(0.06)
+            try:
+                while not self.frame_q.empty():
+                    last_frame, _ = self.frame_q.get_nowait()
+            except Exception:
+                pass
+            if last_frame is not None:
+                break
+
+        if last_frame is None:
+            messagebox.showerror("Errore", "Nessun frame disponibile dalla camera.")
+            return
+
+        # Rileva marker ArUco sul frame catturato
+        gray     = cv2.cvtColor(last_frame, cv2.COLOR_BGR2GRAY)
+        aruco_d  = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
+        aruco_p  = cv2.aruco.DetectorParameters()
+        detector = cv2.aruco.ArucoDetector(aruco_d, aruco_p)
+        corners, ids, _ = detector.detectMarkers(gray)
+
+        if ids is None:
+            messagebox.showerror("Calibrazione fallita",
+                                 "Nessun marker ArUco rilevato.\n"
+                                 "Controlla che i marker siano visibili e ben illuminati.")
+            return
+
+        found = {}
+        for i, mid in enumerate(ids.flatten()):
+            if mid in target_ids:
+                found[int(mid)] = corners[i][0].mean(axis=0).tolist()
+
+        # Bastano 3 marker su 4 per calibrare
+        if len(found) < ARUCO_MIN_VISIBLE:
+            missing = [tid for tid in target_ids if tid not in found]
+            messagebox.showerror(
+                "Calibrazione fallita",
+                f"Trovati solo {len(found)}/4 marker (servono almeno {ARUCO_MIN_VISIBLE}).\n"
+                f"Marker mancanti: {missing}\n\n"
+                "Verifica che i marker siano visibili e gli ID corretti.")
+            return
+
+        # Calcola circocentro come verifica
+        # Kåsa circle fit su tutti i marker trovati — robusto al
+        # posizionamento impreciso (minimizza somma quadrati distanze)
+        center, radius = kasa_circle_fit(list(found.values()))
+        if center is None or radius < 20:
+            messagebox.showerror("Calibrazione fallita",
+                                 "I marker sembrano collineari o troppo vicini.\n"
+                                 "Controlla il posizionamento.")
+            return
+
+        # Per ogni marker salva l'offset rispetto al centro calibrato.
+        # A runtime: centro_stimato = pos_rilevata - offset
+        marker_offsets = {
+            mid: (np.array(pos) - center).tolist()
+            for mid, pos in found.items()
+        }
+
+        calib = {
+            'marker_ids':       target_ids,
+            'marker_centers':   found,                   # {id: [x, y]}
+            'circle_center_px': center.tolist(),
+            'circle_radius_px': round(radius, 1),
+            'marker_offsets':   {str(k): v for k, v in marker_offsets.items()},
+        }
+        self.calib_ref[0] = calib
+        self._save_aruco_calib(calib)
+        self._update_calib_ui(calib)
+        self._log(f"ArUco calibrato (Kåsa fit) — {len(found)}/4 marker, IDs {target_ids}, "
+                  f"centro ({center[0]:.0f},{center[1]:.0f}), "
+                  f"r={radius:.0f}px", "system")
+        messagebox.showinfo("Calibrazione OK",
+                            f"Piattaforma calibrata con successo!\n"
+                            f"Metodo: Kåsa least-squares fit\n"
+                            f"Marker usati: {len(found)}/4\n"
+                            f"Centro: ({center[0]:.0f}, {center[1]:.0f}) px\n"
+                            f"Raggio: {radius:.0f} px\n\n"
+                            f"Il posizionamento impreciso dei marker\n"
+                            f"è stato compensato automaticamente.")
+
+    def _reset_aruco_calib(self):
+        if not messagebox.askyesno("Reset calibrazione",
+                                   "Eliminare la calibrazione corrente?"):
+            return
+        self.calib_ref[0] = None
+        if ARUCO_CALIB_FILE.exists():
+            ARUCO_CALIB_FILE.unlink()
+        self.lbl_calib_status.config(text="● NON CALIBRATO", fg=self.RED)
+        self.lbl_calib_detail.config(text="Calibrazione eliminata.")
+        self._log("Calibrazione ArUco eliminata.", "system")
+
+    def _save_aruco_calib(self, calib: dict):
+        try:
+            ARUCO_CALIB_FILE.write_text(
+                json.dumps(calib, indent=2), encoding="utf-8")
+        except OSError as e:
+            self._log(f"Errore scrittura calibrazione: {e}", "error")
+
+    def _load_aruco_calib(self):
+        if not ARUCO_CALIB_FILE.exists():
+            return
+        try:
+            calib = json.loads(ARUCO_CALIB_FILE.read_text(encoding="utf-8"))
+            # Normalizza chiavi int (JSON usa stringhe)
+            # Converti chiavi stringa in int (JSON le serializza come str)
+            for key in ('marker_centers', 'marker_offsets'):
+                if key in calib:
+                    calib[key] = {int(k): v for k, v in calib[key].items()}
+            self.calib_ref[0] = calib
+            self._update_calib_ui(calib)
+            self._log(f"Calibrazione ArUco caricata — IDs {calib['marker_ids']}", "system")
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            self._log(f"Errore lettura calibrazione ArUco: {e}", "error")
+
+    def _update_calib_ui(self, calib: dict):
+        """Aggiorna le etichette nel tab ArUco con i dati della calibrazione."""
+        ids = calib['marker_ids']
+        cx, cy = calib.get('circle_center_px', calib.get('circumcenter_px', [0,0]))
+        r  = calib.get('circle_radius_px', calib.get('circumradius_px', 0))
+        n_off = len(calib.get('marker_offsets', {}))
+        self.lbl_calib_status.config(
+            text=f"● CALIBRATO  IDs: {ids}", fg=self.ACCENT)
+        self.lbl_calib_detail.config(
+            text=f"Centro: ({cx:.0f}, {cy:.0f})  |  Raggio: {r:.0f} px  |  "
+                 f"Offset: {n_off}/{len(ids)} marker\n"
+                 f"File: {ARUCO_CALIB_FILE.name}")
+        # Aggiorna anche gli spinbox ID
+        for var, mid in zip(self._marker_id_vars, ids):
+            var.set(mid)
+
+    # ── Poll marker LED (chiamato da _poll_info) ─────────────────────────── #
+
+    def _update_marker_leds(self, markers_seen: list):
+        calib = self.calib_ref[0]
+        target_ids = calib['marker_ids'] if calib else ARUCO_IDS_DEFAULT
+        for i, (lbl, mid) in enumerate(zip(self._marker_leds, target_ids)):
+            seen = mid in markers_seen
+            color = self.ACCENT if seen else self.RED
+            lbl.config(text=f"{'●' if seen else '○'} M{i}\nID {mid}", fg=color)
+
+    # ══════════════════════════════════════════════════════════════════════ #
     #  PACKET LOG
     # ══════════════════════════════════════════════════════════════════════ #
 
@@ -1414,7 +1789,7 @@ class App(tk.Tk):
             self.run_ev.set()
             self.vision_thread = VisionThread(
                 self.cam_idx_var.get(), self.frame_q, self.info_q,
-                self.ser_ref, self.run_ev)
+                self.ser_ref, self.run_ev, self.calib_ref)
             self.vision_thread.start()
             self.cam_btn.config(text="⬛  FERMA CAMERA",
                                 bg=self.RED, fg="#ffffff")
@@ -1511,6 +1886,18 @@ class App(tk.Tk):
                     self._log(f"TX {info['pkt']}", "tracking")
                     self.pkt_count += 1
                     self.pkt_count_var.set(f"PKT: {self.pkt_count}")
+                    self._update_marker_leds(info.get('markers', []))
+                elif info['type'] == 'status':
+                    # Aggiorna LED marker e stato piattaforma/pallina senza loggare
+                    self._update_marker_leds(info.get('markers', []))
+                    pc = self.ACCENT if info['plat'] else self.MUTED
+                    bc = self.ACCENT if info['ball'] else self.MUTED
+                    self.lbl_plat.config(
+                        text=f"● Piattaforma: {'OK' if info['plat'] else 'N/D'}",
+                        fg=pc)
+                    self.lbl_ball.config(
+                        text=f"● Pallina:      {'OK' if info['ball'] else 'N/D'}",
+                        fg=bc)
         except queue.Empty:
             pass
         self.after(100, self._poll_info)
