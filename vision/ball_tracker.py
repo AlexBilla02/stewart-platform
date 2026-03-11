@@ -222,6 +222,9 @@ class VisionThread(threading.Thread):
                 time.sleep(0.05)
                 continue
 
+            # frame_clean = frame originale, usato per HSV (mai toccato da draw)
+            # frame       = copia su cui disegnare HUD e overlay
+            frame_clean = frame.copy()
             calib = self.calib_ref[0]
 
             # ── Rileva marker ArUco ──────────────────────────────────────── #
@@ -305,7 +308,8 @@ class VisionThread(threading.Thread):
                             (0, 80, 220), 2)
 
             # ── HSV pallina nella ROI ─────────────────────────────────────── #
-            hsv    = cv2.cvtColor(cv2.GaussianBlur(frame, (5, 5), 0),
+            # Usa frame_clean (senza overlay) per non confondere l'HSV
+            hsv    = cv2.cvtColor(cv2.GaussianBlur(frame_clean, (5, 5), 0),
                                   cv2.COLOR_BGR2HSV)
             mask_b = cv2.inRange(hsv, LOWER_BALL, UPPER_BALL)
 
