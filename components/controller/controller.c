@@ -5,14 +5,14 @@
 // best values: 0.05, 0.03, 0.05
 
 #define DEFAULT_KP            0.05f  // proportional gain
-#define DEFAULT_KI            0.03f  // integral gain
+#define DEFAULT_KI            0.015f  // integral gain
 #define DEFAULT_KD            0.05f  // derivative gain
 
 #define DEFAULT_SETPOINT_X    0.0f  // platform center X
 #define DEFAULT_SETPOINT_Y    0.0f  // platform center Y
 
 #define DEFAULT_INTEGRAL_LIM  50.0f // anti windup clamp limit
-#define DEFAULT_OUTPUT_LIM    30.0f // output limit
+#define DEFAULT_OUTPUT_LIM    40.0f // output limit
 
 #define NEUTRAL_ANGLE         95.0f // neutral servo position
 #define IK_GAIN               1.0f  // inverted cinematic gain 
@@ -70,8 +70,8 @@ static float pid_compute(pid_state_t *pid, float measurement, float dt)
     float output = pid->kp * error + pid->ki * pid->integral + pid->kd * derivative;
 
     // check on output saturation
-    if (output >  pid->output_limit) output =  pid->output_limit;
-    if (output < -pid->output_limit) output = -pid->output_limit;
+    // if (output >  pid->output_limit) output =  pid->output_limit;
+    // if (output < -pid->output_limit) output = -pid->output_limit;
 
     return output;
 }
