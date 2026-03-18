@@ -2,6 +2,11 @@
 #include "uart_comm.h"    /* ball_pos_t       */
 #include "actuators.h"    /* SERVO_COUNT, limiti angolari */
 
+typedef enum{
+    QUIET,
+    DEFAULT
+} pid_mode_t;
+
 typedef struct {
     float kp;            
     float ki;            
@@ -10,7 +15,8 @@ typedef struct {
     float integral;      
     float prev_error;    
     float integral_limit;
-    float output_limit;  
+    float output_limit;
+    pid_mode_t mode;  
 } pid_state_t;
 
 typedef struct {
