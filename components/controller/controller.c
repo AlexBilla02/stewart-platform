@@ -161,11 +161,11 @@ void controller_init(controller_t *ctrl)
 void controller_compute(controller_t *ctrl, const ball_pos_t *pos, float dt, float angles_out[])
 {
     // PID
-    // the error on the X axis requires a correction rotating the plate w.r.t the Y axis
-    float roll = pid_compute(&ctrl->pid_x, pos->x, dt);
+    // the error on the X axis requires a correction rotating the plate w.r.t the Y axis (pitch)
+    float pitch = pid_compute(&ctrl->pid_x, pos->x, dt);
 
-    // the error on the Y axis requires a correction rotating the plate w.r.t the X axis
-    float pitch = pid_compute(&ctrl->pid_y, pos->y, dt);
+    // the error on the Y axis requires a correction rotating the plate w.r.t the X axis (roll)
+    float roll = pid_compute(&ctrl->pid_y, pos->y, dt);
     
     ESP_LOGI(TAG, "[pid_x] mode: %d | [pid_y] mode: %d", ctrl->pid_x.mode, ctrl->pid_y.mode);
 
@@ -176,13 +176,13 @@ void controller_compute(controller_t *ctrl, const ball_pos_t *pos, float dt, flo
         at 0° (corresponding to the max right pos of the ball, in the center line)
         
         Each servo produces an angle based on its position, for example, servo 0 will not have effect for
-        any value of pitch, since ti would involve a rotation around the X axis
+        any value of roll, since it would involve a rotation around the X axis
 
         The gain can be used for correction beyond the PID parameters
     */
     for (int i = 0; i < SERVO_COUNT; i++) {
         float alpha = servo_mount_angle[i];
-        float tilt  = ctrl->gain * (cosf(alpha) * roll + sinf(alpha) * pitch);
+        float tilt  = ctrl->gain * (cosf(alpha) * pitch + sinf(alpha) * roll);
         float angle = ctrl->neutral_angle + tilt;
 
         // output clamp
