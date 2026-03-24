@@ -15,13 +15,18 @@ static const char *TAG="uart_comm";
 #define UART_RX_PIN 44
 
 QueueHandle_t ball_pos_queue=NULL;
+
+// private queue for the uart communication handling
 static QueueHandle_t uart_event_queue;
 
 esp_err_t uart_comm_init(void){
+
+    // initialization of the shared single-item queue
     ball_pos_queue=xQueueCreate(1,sizeof(ball_pos_t));
     if(ball_pos_queue==NULL)
         return ESP_FAIL;
 
+    // UART driver initialization
     uart_config_t uart_config={
         .baud_rate=UART_BAUD_RATE,
         .data_bits=UART_DATA_8_BITS,
@@ -38,6 +43,7 @@ esp_err_t uart_comm_init(void){
 
 }
 
+// this task starts upon new UART packet reception
 void uart_rx_task(void *pvParameters){
     uart_event_t event;
     uart_packet_t packet;
@@ -45,11 +51,16 @@ void uart_rx_task(void *pvParameters){
     ESP_LOGI(TAG,"Task UART RX listening");
 
     while(1){
+        // wait until next UART packet is received
         if(xQueueReceive(uart_event_queue, (void *) &event,portMAX_DELAY)){
+            // on new data reception
             if(event.type==UART_DATA){
                 int len = uart_read_bytes(UART_PORT_NUM, &packet, sizeof(uart_packet_t), portMAX_DELAY);
+
                 if(len == sizeof(uart_packet_t) && packet.header == PACKET_HEADER){                    
                     uint8_t crc = 0;
+
+                    // CRC calc as XOR of each packet byte (except the last one)
                     for (int i = 0; i < sizeof(uart_packet_t) - 1; i++) {
                         crc ^= ((uint8_t*)&packet)[i];
                     }
@@ -59,12 +70,16 @@ void uart_rx_task(void *pvParameters){
                         continue;
                     }
 
+                    // perform distinct action based on the cmd field (0x01 for tracking and 0x02 for calibration)
                     switch (packet.cmd_type) {
+
+                        // if cmd field is 0x01 it shall contains the updated ball coords
                         case CMD_TRACKING:{
                             xQueueOverwrite(ball_pos_queue, &packet.payload.tracking);
                             break;
                         }
-                            
+                        
+                        // if cmd field is 0x02 it shall contains the servo id and the target angle for the calibration
                         case CMD_SERVO_TEST:{
                             ESP_LOGI(TAG, "New calibration command (servo_id: %d) angle (%d)", packet.payload.servo.servo_id, packet.payload.servo.angle);
                             actuators_set_angles_single(packet.payload.servo.servo_id, packet.payload.servo.angle);

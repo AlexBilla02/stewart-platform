@@ -9,11 +9,16 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 
-#define LOOP_PERIOD_MS   20
+#define LOOP_PERIOD_MS   20 // strict deadline for the control task
 #define LOOP_DT          (LOOP_PERIOD_MS / 1000.0f)
 
 static const char *TAG = "control_loop";
-extern QueueHandle_t ball_pos_queue;
+
+/*
+    This is the shared data structure between control task and uart task. For each new position received the uart task
+    overwrites this single-item queue and for each 20ms cycle the control task get the updated value without removing it
+    using xQueuePeek.
+*/
 
 void control_loop_task(void *pvParameters)
 {

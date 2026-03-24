@@ -5,10 +5,10 @@
 #include "actuators.h"
 #include "esp_log.h"
 
-#define SERVO_TIMEBASE_RESOLUTION_HZ 1000000  // 1 MHz (1 tick = 1 microsecondo)
+#define SERVO_TIMEBASE_RESOLUTION_HZ 1000000  // 1 MHz (1 tick = 1 us)
 #define SERVO_TIMEBASE_PERIOD        20000    // 20000 tick = 20 millisecondi (50 Hz)
-#define SERVO_MIN_PULSEWIDTH_US 500
-#define SERVO_MAX_PULSEWIDTH_US 2500
+#define SERVO_MIN_PULSEWIDTH_US 500     // 0 degrees
+#define SERVO_MAX_PULSEWIDTH_US 2500    // 180 degrees
 #define NEUTRAL_ANGLE         95.0f // neutral servo position
 
 static const char *TAG="actuators";
@@ -82,6 +82,7 @@ esp_err_t actuators_set_neutral(void){
     return actuators_set_angles(neutral_angles);
 }
 
+// set angle for each servo from the given angles array
 esp_err_t actuators_set_angles(const float angles[]){
     for(int i=0; i<SERVO_COUNT; i++){
         if(angles[i]<SERVO_MIN_ANGLE || angles[i]>SERVO_MAX_ANGLE){
@@ -97,6 +98,7 @@ esp_err_t actuators_set_angles(const float angles[]){
     return ESP_OK;
 }
 
+// set angle for a single servo specified by id
 esp_err_t actuators_set_angles_single(uint8_t servo_id, int16_t target_angle){
     if(servo_id >= SERVO_COUNT){
         ESP_LOGE(TAG,"servo_id %d out of range",servo_id);
