@@ -1,15 +1,3 @@
-"""
-Ball-on-Platform Controller
-GUI per tracking visivo e calibrazione servo tramite ESP32.
-
-Struttura pacchetto (11 byte):
-  [0]     HEADER   1B  = 0xAA
-  [1]     TYPE     1B  = 0x00 tracking | 0x01 calibrazione
-  [2..5]  ARG1     4B  signed int32 LE  (rel_x | servo_id)
-  [6..9]  ARG2     4B  signed int32 LE  (rel_y | angolo)
-  [10]    CHECKSUM 1B  XOR di [0..9]
-"""
-
 import cv2
 import json
 import numpy as np
