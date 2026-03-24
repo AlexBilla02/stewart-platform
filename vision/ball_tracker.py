@@ -25,62 +25,42 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import queue
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  COSTANTI — modifica qui per cambiare i default all'avvio
-# ══════════════════════════════════════════════════════════════════════════════
 
 HEADER       = 0xAA
 PKT_TRACKING = 0x01
 PKT_CALIB    = 0x02
 BAUD_RATE    = 115200
 
-# ── HSV piattaforma (verde) e pallina (arancione) ────────────────────────── #
-LOWER_GREEN = np.array([50,  55, 127])
-UPPER_GREEN = np.array([77, 255, 255])
+#  HSV range to identify the ball 
 LOWER_BALL  = np.array([ 5,  80, 120])
 UPPER_BALL  = np.array([35, 255, 255])
 
 VIDEO_W, VIDEO_H = 640, 480
 
-# ── ArUco ────────────────────────────────────────────────────────────────── #
-# Dizionario usato per stampare i marker (deve corrispondere ai marker fisici)
+# ArUco settings
 ARUCO_DICT_ID     = cv2.aruco.DICT_4X4_50
-# ID dei 4 marker incollati sulla piattaforma (modificabili nell'interfaccia)
-# Con 4 marker la pallina può occluderne al massimo 1 — i 3 rimasti bastano
-# per calcolare il circocentro con qualsiasi combinazione.
 ARUCO_IDS_DEFAULT = [0, 1, 2, 3]
-# Numero minimo di marker visibili per calcolare la piattaforma
 ARUCO_MIN_VISIBLE = 3
-# Margine extra (pixel) aggiunto al raggio della ROI per rilevare la pallina
-# anche quando è al bordo o leggermente fuori dai marker
 ROI_RADIUS_MARGIN = 18
-# File di calibrazione ArUco (stessa cartella dello script)
 ARUCO_CALIB_FILE  = Path(__file__).parent / "aruco_calib.json"
 
 
-# ── File preset HSV ─────────────────────────────────────────────────────── #
-# Il file viene creato nella stessa cartella dello script
+# File preset HSV #
 PRESETS_FILE = Path(__file__).parent / "hsv_presets.json"
-# Percorso del device video da controllare con v4l2-ctl
 CAM_DEVICE = "/dev/video0"
 
-# ── Default esposizione ──────────────────────────────────────────────────── #
-# auto_exposure: 1 = Manuale, 3 = Auto  (semantica v4l2 UVC)
-DEFAULT_AUTO_EXPOSURE    = 1          # 1 = Manuale all'avvio
-DEFAULT_EXPOSURE_TIME    = 150        # exposure_time_absolute (1–2000 tipico)
+# Camera default settings
+DEFAULT_AUTO_EXPOSURE    = 1          
+DEFAULT_EXPOSURE_TIME    = 150        
 EXPOSURE_TIME_MIN        = 1
 EXPOSURE_TIME_MAX        = 2000
 
-# ── Default bilanciamento del bianco ────────────────────────────────────── #
-# white_balance_automatic: 0 = Manuale, 1 = Auto
-DEFAULT_AUTO_WB          = 0          # 0 = Manuale all'avvio
-DEFAULT_WB_TEMPERATURE   = 4600       # Kelvin (tipico 2800–6500)
+
+DEFAULT_AUTO_WB          = 0          
+DEFAULT_WB_TEMPERATURE   = 4600       
 WB_TEMPERATURE_MIN       = 2800
 WB_TEMPERATURE_MAX       = 6500
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  UTILITY — pacchetti seriali
-# ══════════════════════════════════════════════════════════════════════════════
 
 def build_packet(pkt_type: int, arg1: int, arg2: int) -> bytes:
     body = struct.pack('<BBii', HEADER, pkt_type, int(arg1), int(arg2))
@@ -93,14 +73,11 @@ def packet_hex(pkt: bytes) -> str:
     return ' '.join(f'{b:02X}' for b in pkt)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UTILITY — controllo V4L2
+#  UTILITY — V4L2 control
 # ══════════════════════════════════════════════════════════════════════════════
 
 def v4l2_set(device: str, control: str, value: int):
-    """
-    Esegue: v4l2-ctl -d <device> -c <control>=<value>
-    Restituisce (ok: bool, messaggio: str).
-    """
+    
     cmd = ["v4l2-ctl", "-d", device, "-c", f"{control}={value}"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
@@ -117,8 +94,7 @@ def v4l2_set(device: str, control: str, value: int):
 
 def v4l2_get(device: str, control: str):
     """
-    Legge il valore corrente di un controllo V4L2.
-    Restituisce (ok: bool, valore: int|None, riga: str).
+    Reads the actual value of V4L2.
     """
     cmd = ["v4l2-ctl", "-d", device, "--get-ctrl", control]
     try:
@@ -132,18 +108,8 @@ def v4l2_get(device: str, control: str):
     except Exception as e:
         return False, None, str(e)
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  UTILITY GEOMETRICA
-# ══════════════════════════════════════════════════════════════════════════════
 
 def kasa_circle_fit(points):
-    """
-    Fit di un cerchio ai minimi quadrati (metodo di Kåsa) su N punti 2D.
-    Robusto agli errori di posizionamento: minimizza la somma dei quadrati
-    delle distanze di ogni punto dalla circonferenza.
-    Restituisce (center: np.array [x,y], radius: float) oppure (None, 0).
-    Richiede almeno 3 punti non collineari.
-    """
     pts = np.array(points, dtype=float)
     if len(pts) < 3:
         return None, 0.0
@@ -163,18 +129,7 @@ def kasa_circle_fit(points):
 
 
 def estimate_center_from_offsets(found: dict, offsets: dict):
-    """
-    Stima il centro della piattaforma usando gli offset di calibrazione.
 
-    Per ogni marker visibile calcola:
-        stima_centro = pos_rilevata - offset_calibrato
-
-    dove offset_calibrato = pos_marker_calibrata - centro_calibrato.
-    Restituisce la media di tutte le stime (una per ogni marker visibile).
-
-    found:   {marker_id: [x, y]}   — posizioni rilevate runtime
-    offsets: {marker_id: [dx, dy]} — offset salvati durante la calibrazione
-    """
     estimates = []
     for mid, pos in found.items():
         if mid in offsets:
@@ -187,8 +142,9 @@ def estimate_center_from_offsets(found: dict, offsets: dict):
 
 class VisionThread(threading.Thread):
     """
-    Cattura frames, rileva la piattaforma tramite 3 marker ArUco,
-    individua la pallina con HSV nella ROI, invia coordinate all'ESP32.
+    Capture frames from camera, identifies platform with at least 3 ArUco markers
+    and identifies ball inside the ROI using HSV ranges.
+    Send coordinates to ESP32.
     """
 
     def __init__(self, cam_idx, frame_q, info_q, serial_ref, running_ev,
@@ -199,17 +155,16 @@ class VisionThread(threading.Thread):
         self.info_q     = info_q
         self.serial_ref = serial_ref
         self.running_ev = running_ev
-        self.calib_ref  = calib_ref   # [dict_or_None] — condiviso con GUI
+        self.calib_ref  = calib_ref   
         self.active     = False
 
-    # ── Loop principale ───────────────────────────────────────────────────── #
 
     def run(self):
-        # Inizializza ArUco nel thread
+        # ArUco initialization
         aruco_dict   = cv2.aruco.getPredefinedDictionary(ARUCO_DICT_ID)
         aruco_params = cv2.aruco.DetectorParameters()
         detector     = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
-
+        #Camera initialization
         cap = cv2.VideoCapture(self.cam_idx)
         cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
         cap.set(cv2.CAP_PROP_EXPOSURE, -6)
@@ -222,12 +177,12 @@ class VisionThread(threading.Thread):
                 time.sleep(0.05)
                 continue
 
-            # frame_clean = frame originale, usato per HSV (mai toccato da draw)
-            # frame       = copia su cui disegnare HUD e overlay
+            # frame_clean = original frame
+            # frame       = fram copy used to draw the HUD
             frame_clean = frame.copy()
             calib = self.calib_ref[0]
 
-            # ── Rileva marker ArUco ──────────────────────────────────────── #
+            # identify ArUco markers
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             corners, ids, _ = detector.detectMarkers(gray)
 
@@ -249,10 +204,8 @@ class VisionThread(threading.Thread):
                                    5, (0, 255, 255), -1)
 
                 if len(found) >= ARUCO_MIN_VISIBLE:
-                    # Stima centro con offset calibrati (robusto al
-                    # posizionamento impreciso dei marker)
+                    
                     offsets_raw = calib.get('marker_offsets', {})
-                    # Normalizza chiavi a int (JSON potrebbe averle come str)
                     offsets = {int(k): v for k, v in offsets_raw.items()}
 
                     center_arr = None
@@ -263,7 +216,6 @@ class VisionThread(threading.Thread):
                         radius     = float(calib.get('circle_radius_px',
                                            calib.get('circumradius_px', 0.0)))
 
-                    # Fallback a Kåsa se offset assenti o stima fallita
                     if center_arr is None or radius < 20:
                         center_arr, radius = kasa_circle_fit(
                             list(found.values()))
@@ -273,7 +225,7 @@ class VisionThread(threading.Thread):
                         plat_center = (int(cx_f), int(cy_f))
                         plat_radius = int(radius)
 
-                        # BGR: (200, 0, 0) = blu
+                        
                         BLUE      = (200, 60,  0)
                         BLUE_THIN = (180, 40,  0)
                         cv2.circle(frame, plat_center, plat_radius, BLUE, 2)
@@ -307,8 +259,7 @@ class VisionThread(threading.Thread):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55,
                             (0, 80, 220), 2)
 
-            # ── HSV pallina nella ROI ─────────────────────────────────────── #
-            # Usa frame_clean (senza overlay) per non confondere l'HSV
+            #identify ball over the platform
             hsv    = cv2.cvtColor(cv2.GaussianBlur(frame_clean, (5, 5), 0),
                                   cv2.COLOR_BGR2HSV)
             mask_b = cv2.inRange(hsv, LOWER_BALL, UPPER_BALL)
@@ -359,13 +310,12 @@ class VisionThread(threading.Thread):
                             'markers': markers_seen,
                         })
 
-            # ── HUD ───────────────────────────────────────────────────────── #
             n_seen = len(markers_seen)
             m_col  = self._marker_color(n_seen)
             cv2.putText(frame, f"MARKERS {n_seen}/4",
                         (VIDEO_W - 130, 55),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, m_col, 1)
-            status_col = (0, 220, 80) if (ball_found and plat_center)                          else (0, 60, 220)
+            status_col = (0, 220, 80) if (ball_found and plat_center) else (0, 60, 220)
             cv2.putText(frame, "TRACKING ON" if self.active else "PREVIEW",
                         (VIDEO_W - 160, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, status_col, 2)
@@ -384,10 +334,10 @@ class VisionThread(threading.Thread):
 
     @staticmethod
     def _marker_color(n: int):
-        if n == 4: return (0, 220, 80)    # tutti e 4: verde
-        if n == 3: return (0, 200, 200)   # 3/4: ciano — funziona ma degradato
-        if n == 2: return (0, 140, 220)   # 2/4: blu — insufficiente
-        return (0, 60, 220)               # <2: rosso-blu
+        if n == 4: return (0, 220, 80)    
+        if n == 3: return (0, 200, 200)   
+        if n == 2: return (0, 140, 220)   
+        return (0, 60, 220)               
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  APPLICAZIONE GUI
