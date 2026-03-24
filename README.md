@@ -85,9 +85,28 @@ Integrity is guaranteed by an XOR checksum on the full frame.
 
 Two FreeRTOS tasks with different priorities share a single-element queue.
 
-<div align="center">
-  <img src="assets/tasks-diagram.png" width="700"/>
-</div>
+```mermaid
+sequenceDiagram
+    participant U as uart_comm.c (Low Priority)
+    participant CL as control_loop.c (High Priority)
+    participant CT as controller.c
+    participant AC as actuators.c
+
+    loop Every ~33ms (jittery)
+        U->>CL: xQueueOverwrite(ball_pos_queue)
+    end
+
+    loop Every 20ms (xTaskDelayUntil)
+        Note over CL: Reuses last known position<br/>if no new frame arrived
+        CL->>CT: ball position (x, y)
+        CT->>CT: Compute PID error
+        CT->>CT: Pitch + Roll → Inverse Kinematics
+        CT->>CL: target_angles[3]
+        CL->>AC: target_angles[3]
+        AC->>AC: angles → PWM pulse width
+    end
+```
+  
 
 The control loop runs at a strict **50 Hz** using `xTaskDelayUntil`, making
 it fully deterministic regardless of UART jitter. If the camera drops a frame,
